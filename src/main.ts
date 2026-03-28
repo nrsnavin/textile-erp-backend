@@ -11,8 +11,8 @@ async function bootstrap() {
     transform: true,
   }));
 
-  await app.listen(3009);
-  console.log('API running on http://localhost:3009');
+  await app.listen(3008);
+  console.log('API running on http://localhost:3008');
 }
 
 bootstrap();

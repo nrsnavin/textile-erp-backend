@@ -59,14 +59,14 @@ services:
         condition: service_started
     environment:
       NODE_ENV:      development
-      PORT:          3009
+      PORT:          3008
       DATABASE_URL:  postgresql://postgres:postgres@postgres:5432/textile_erp
       REDIS_URL:     redis://:redispassword@redis:6379
       KAFKA_BROKERS: kafka:29092
       JWT_SECRET:    dev-secret-change-in-production
       ML_SERVICE_URL: http://ml:8000
     ports:
-      - "3009:3009"
+      - "3008:3008"
     volumes:
       - .:/app
       - /app/node_modules
@@ -82,12 +82,12 @@ services:
       - api
     environment:
       NODE_ENV:              development
-      NEXT_PUBLIC_API_URL:   http://localhost:3009
-      NEXT_PUBLIC_WS_URL:    ws://localhost:3009
-      NEXTAUTH_URL:          http://localhost:3002
+      NEXT_PUBLIC_API_URL:   http://localhost:3008
+      NEXT_PUBLIC_WS_URL:    ws://localhost:3008
+      NEXTAUTH_URL:          http://localhost:3003
       NEXTAUTH_SECRET:       dev-nextauth-secret
     ports:
-      - "3002:3002"
+      - "3003:3003"
     volumes:
       - ../textile-erp-web:/app
       - /app/node_modules

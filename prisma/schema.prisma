@@ -14,3 +14,83 @@ model Tenant {
   createdAt DateTime @default(now())
   @@map("tenants")
 }
+
+// ADD THESE MODELS TO YOUR EXISTING prisma/schema.prisma
+// These extend the auth capabilities beyond the basic User model
+
+model User {
+  id              String    @id @default(uuid())
+  tenantId        String    @map("tenant_id")
+  email           String
+  name            String
+  passwordHash    String    @map("password_hash")
+  roles           String[]
+  isActive        Boolean   @default(true)  @map("is_active")
+  isEmailVerified Boolean   @default(false) @map("is_email_verified")
+  isMfaEnabled    Boolean   @default(false) @map("is_mfa_enabled")
+  lastLoginAt     DateTime? @map("last_login_at")
+  failedLoginCount Int      @default(0)     @map("failed_login_count")
+  lockedUntil     DateTime? @map("locked_until")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt      @map("updated_at")
+
+  otpCodes        OtpCode[]
+  refreshTokens   RefreshToken[]
+  passwordResets  PasswordReset[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("users")
+}
+
+// OTP codes for MFA and email verification
+model OtpCode {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  tenantId    String   @map("tenant_id")
+  code        String   // 6-digit hashed OTP
+  type        String   // MFA_LOGIN | EMAIL_VERIFY | PASSWORD_RESET
+  expiresAt   DateTime @map("expires_at")
+  usedAt      DateTime? @map("used_at")
+  attempts    Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("otp_codes")
+}
+
+// Refresh tokens — stored in DB for revocation support
+model RefreshToken {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  tenantId    String   @map("tenant_id")
+  tokenHash   String   @map("token_hash")  // hashed — never store raw
+  expiresAt   DateTime @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// Password reset tokens
+model PasswordReset {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  tenantId    String   @map("tenant_id")
+  tokenHash   String   @map("token_hash")
+  expiresAt   DateTime @map("expires_at")
+  usedAt      DateTime? @map("used_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_resets")
+}
