@@ -8,8 +8,8 @@ import {
 } from '@nestjs/swagger';
 import { Throttle }     from '@nestjs/throttler';
 import { AuthService }  from './auth.service';
-import { JwtAuthGuard } from '../shared/guards/jwt-auth.guard';
-import { CurrentUser }  from '../shared/decorators/current-tenant.decorator';
+import { JwtAuthGuard } from '../../shared/guards/jwt-auth.guard';
+import { CurrentUser }  from '../../shared/decorators/current-user.decorator';
 import {
   LoginDto, VerifyOtpDto, RegisterDto, RefreshTokenDto,
   ForgotPasswordDto, ResetPasswordDto, ChangePasswordDto,
