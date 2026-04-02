@@ -17,7 +17,7 @@ export class BuyersController {
 
   @Get()
   @ApiAuth(Role.OWNER, Role.MERCHANDISER, Role.ACCOUNTANT)
-  @ApiOperation({ summary: 'List all buyers' })
+  @ApiOperation({ summary: 'List all buyers with filters (country, segment, payment terms, search)' })
   async listBuyers(
     @Query() filters: BuyerFilterDto,
     @CurrentTenant() tenantId: string,
@@ -35,10 +35,30 @@ export class BuyersController {
     return this.buyersService.getBuyer(id, tenantId);
   }
 
+  @Get(':id/stats')
+  @ApiAuth(Role.OWNER, Role.MERCHANDISER, Role.ACCOUNTANT)
+  @ApiOperation({ summary: 'Get buyer statistics — order count, GMV, outstanding balance' })
+  async getBuyerStats(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenantId: string,
+  ) {
+    return this.buyersService.getBuyerStats(id, tenantId);
+  }
+
+  @Get(':id/audit')
+  @ApiAuth(Role.OWNER, Role.ACCOUNTANT)
+  @ApiOperation({ summary: 'Get full audit trail for a buyer' })
+  async getBuyerAuditHistory(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenantId: string,
+  ) {
+    return this.buyersService.getBuyerAuditHistory(id, tenantId);
+  }
+
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiAuth(Role.OWNER, Role.MERCHANDISER)
-  @ApiOperation({ summary: 'Create a new buyer' })
+  @ApiOperation({ summary: 'Create a new buyer (supports payment terms, credit limit, segment)' })
   async createBuyer(
     @Body() dto: CreateBuyerDto,
     @CurrentTenant() tenantId: string,
@@ -59,9 +79,20 @@ export class BuyersController {
     return this.buyersService.updateBuyer(id, dto, tenantId, userId);
   }
 
+  @Patch(':id/reactivate')
+  @ApiAuth(Role.OWNER, Role.MERCHANDISER)
+  @ApiOperation({ summary: 'Reactivate a previously deactivated buyer' })
+  async reactivateBuyer(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenantId: string,
+    @CurrentUser()   userId: string,
+  ) {
+    return this.buyersService.reactivateBuyer(id, tenantId, userId);
+  }
+
   @Delete(':id')
   @ApiAuth(Role.OWNER)
-  @ApiOperation({ summary: 'Deactivate a buyer' })
+  @ApiOperation({ summary: 'Deactivate a buyer (soft delete)' })
   async deleteBuyer(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentTenant() tenantId: string,

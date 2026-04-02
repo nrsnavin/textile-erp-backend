@@ -12,12 +12,18 @@ export class BuyersRepository {
     return this.prisma.buyer.create({
       data: {
         tenantId,
-        name:     dto.name,
-        country:  dto.country,
-        email:    dto.email,
-        phone:    dto.phone,
-        currency: dto.currency ?? 'USD',
-        address:  dto.address,
+        name:         dto.name,
+        country:      dto.country,
+        email:        dto.email,
+        phone:        dto.phone,
+        currency:     dto.currency ?? 'USD',
+        address:      dto.address,
+        paymentTerms: dto.paymentTerms,
+        creditLimit:  dto.creditLimit,
+        creditDays:   dto.creditDays,
+        taxId:        dto.taxId,
+        segment:      dto.segment,
+        website:      dto.website,
       },
     });
   }
@@ -31,9 +37,11 @@ export class BuyersRepository {
   async findWithFilters(filters: BuyerFilterDto, tenantId: string) {
     const where: Prisma.BuyerWhereInput = {
       tenantId,
-      ...(filters.isActive !== undefined && { isActive: filters.isActive }),
-      ...(filters.country  && { country: filters.country }),
-      ...(filters.search   && {
+      ...(filters.isActive     !== undefined && { isActive:     filters.isActive }),
+      ...(filters.country      && { country:      filters.country }),
+      ...(filters.paymentTerms && { paymentTerms: filters.paymentTerms }),
+      ...(filters.segment      && { segment:      filters.segment }),
+      ...(filters.search && {
         OR: [
           { name:  { contains: filters.search, mode: 'insensitive' } },
           { email: { contains: filters.search, mode: 'insensitive' } },
@@ -66,5 +74,39 @@ export class BuyersRepository {
       where: { id },
       data:  { isActive: false },
     });
+  }
+
+  async reactivate(id: string, tenantId: string) {
+    return this.prisma.buyer.update({
+      where: { id },
+      data:  { isActive: true },
+    });
+  }
+
+  /** Aggregated stats for a single buyer — order count, GMV, outstanding invoices. */
+  async getStats(id: string, tenantId: string) {
+    const [orderStats, invoiceStats] = await this.prisma.$transaction([
+      this.prisma.order.aggregate({
+        where:   { buyerId: id, tenantId },
+        _count:  { id: true },
+      }),
+      this.prisma.invoice.aggregate({
+        where:   { buyerId: id, tenantId },
+        _count:  { id: true },
+        _sum:    { total: true, paidAmount: true },
+      }),
+    ]);
+
+    const totalInvoiced  = Number(invoiceStats._sum.total      ?? 0);
+    const totalPaid      = Number(invoiceStats._sum.paidAmount  ?? 0);
+    const outstanding    = totalInvoiced - totalPaid;
+
+    return {
+      orderCount:      orderStats._count.id,
+      invoiceCount:    invoiceStats._count.id,
+      totalInvoiced,
+      totalPaid,
+      outstanding,
+    };
   }
 }
