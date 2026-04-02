@@ -6,8 +6,9 @@ import {
 } from '@nestjs/common';
 import { JwtService }     from '@nestjs/jwt';
 import { ConfigService }  from '@nestjs/config';
-import { PrismaService }  from '../shared/prisma/prisma.service';
-import { EmailService }   from '../shared/services/email.service';
+// CORRECT — go up two levels to reach src/
+import { PrismaService } from '../../shared/prisma/prisma.service';
+import { EmailService }  from '../../shared/services/email.service';
 import * as bcrypt        from 'bcrypt';
 import { randomBytes, createHash } from 'crypto';
 import {

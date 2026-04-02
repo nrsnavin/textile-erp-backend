@@ -18,27 +18,39 @@ import Redis             from 'ioredis';
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
-  private client: Redis;
+  private client!: Redis;
 
   constructor(private readonly config: ConfigService) {}
+async onModuleInit(): Promise<void> {
+  const redisUrl = this.config.get<string>(
+    'REDIS_URL',
+    'redis://127.0.0.1:6379'   // IPv4 default instead of localhost
+  );
 
-  async onModuleInit(): Promise<void> {
-    this.client = new Redis(
-      this.config.get<string>('REDIS_URL', 'redis://localhost:6379'),
-      {
-        maxRetriesPerRequest:    3,
-        retryStrategy: (times) => Math.min(times * 100, 3000),
-        reconnectOnError:        () => true,
-        enableReadyCheck:        true,
-        lazyConnect:             false,
-      },
-    );
+  this.client = new Redis(redisUrl, {
+    maxRetriesPerRequest: 3,
+    retryStrategy: (times) => {
+      if (times > 3) {
+        this.logger.warn('Redis unavailable — continuing without cache');
+        return null;
+      }
+      return Math.min(times * 100, 3000);
+    },
+    lazyConnect:        true,
+    enableOfflineQueue: false,
+  });
 
-    this.client.on('connect',  () => this.logger.log('Redis connected'));
-    this.client.on('error',    (err) => this.logger.error('Redis error', err));
-    this.client.on('reconnecting', () => this.logger.warn('Redis reconnecting...'));
+  this.client.on('connect',      () => this.logger.log('Redis connected'));
+  this.client.on('error',        (err) => this.logger.error('Redis error', err.message));
+  this.client.on('reconnecting', () => this.logger.warn('Redis reconnecting...'));
+
+  try {
+    await this.client.connect();
+  } catch {
+    this.logger.warn('Redis not available — cache disabled');
   }
-
+}
+  
   async onModuleDestroy(): Promise<void> {
     await this.client.quit();
   }
@@ -47,19 +59,21 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   // Checks cache first. On miss, calls fetcher(), caches result, returns it.
   // This is the primary method used across all services.
   async getOrSet<T>(
-    key:        string,
-    ttlSeconds: number,
-    fetcher:    () => Promise<T>,
-  ): Promise<T> {
+  key:        string,
+  ttlSeconds: number,
+  fetcher:    () => Promise<T>,
+): Promise<T> {
+  try {
     const cached = await this.client.get(key);
-    if (cached) {
-      return JSON.parse(cached) as T;
-    }
-
+    if (cached) return JSON.parse(cached) as T;
     const fresh = await fetcher();
     await this.client.setex(key, ttlSeconds, JSON.stringify(fresh));
     return fresh;
+  } catch {
+    // Redis unavailable — fetch directly
+    return fetcher();
   }
+}
 
   // ── Raw get / set ──────────────────────────────────────────────────────
   async get<T>(key: string): Promise<T | null> {

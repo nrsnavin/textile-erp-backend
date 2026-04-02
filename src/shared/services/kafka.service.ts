@@ -53,9 +53,16 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit(): Promise<void> {
+  try {
     await this.producer.connect();
     this.logger.log('Kafka producer connected');
+  } catch (err) {
+    this.logger.warn(
+      'Kafka not available — events will not be emitted. ' +
+      'Start Kafka with: docker compose up -d'
+    );
   }
+}
 
   async onModuleDestroy(): Promise<void> {
     await this.producer.disconnect();
@@ -66,24 +73,24 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   // ── Emit an event to a topic ──────────────────────────────────────────
   // key must be tenantId — ensures all events for one tenant land on
   // the same partition, preserving ordering within a tenant.
-  async emit(
-    topic:   string,
-    message: { key: string; value: unknown },
-  ): Promise<void> {
-    try {
-      await this.producer.send({
-        topic,
-        messages: [{
-          key:   message.key,
-          value: JSON.stringify(message.value),
-        }],
-      });
-      this.logger.debug(`Emitted → ${topic} [key=${message.key}]`);
-    } catch (err) {
-      this.logger.error(`Failed to emit to ${topic}`, err);
-      throw err;
-    }
+async emit(
+  topic:   string,
+  message: { key: string; value: unknown },
+): Promise<void> {
+  try {
+    await this.producer.send({
+      topic,
+      messages: [{
+        key:   message.key,
+        value: JSON.stringify(message.value),
+      }],
+    });
+    this.logger.debug(`Emitted → ${topic} [key=${message.key}]`);
+  } catch (err) {
+    this.logger.warn(`Kafka emit failed for ${topic} — Kafka may be down`);
+    // Do not throw — Kafka failure must not break the main operation
   }
+}
 
   // ── Subscribe to a topic ──────────────────────────────────────────────
   // groupId must be unique per consumer — prevents the same message

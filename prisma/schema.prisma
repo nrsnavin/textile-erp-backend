@@ -94,3 +94,381 @@ model PasswordReset {
   @@index([userId])
   @@map("password_resets")
 }
+
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  action    String
+  tableName String   @map("table_name")
+  recordId  String   @map("record_id")
+  oldValues Json?    @map("old_values")
+  newValues Json?    @map("new_values")
+  ipAddress String?  @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, tableName, createdAt])
+  @@map("audit_log")
+}
+
+
+
+// ── Buyer domain ───────────────────────────────────────────────────────────
+
+model Buyer {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  country     String
+  email       String?
+  phone       String?
+  currency    String   @default("USD")
+  address     String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt      @map("updated_at")
+
+  orders      Order[]
+  invoices    Invoice[]
+
+  @@index([tenantId])
+  @@map("buyers")
+}
+
+// ── Supplier domain ────────────────────────────────────────────────────────
+
+model Supplier {
+  id            String          @id @default(uuid())
+  tenantId      String          @map("tenant_id")
+  name          String
+  gstin         String?
+  email         String?
+  phone         String?
+  address       String?
+  contactPerson String?         @map("contact_person")
+  services      String[]        // FABRIC | KNITTING | DYEING | PRINTING | SEWING
+  vendorScore   Float           @default(100) @map("vendor_score")
+  isActive      Boolean         @default(true) @map("is_active")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt      @map("updated_at")
+
+  purchaseOrders PurchaseOrder[]
+  grns           Grn[]
+
+  @@index([tenantId])
+  @@map("suppliers")
+}
+
+model PurchaseOrder {
+  id           String    @id @default(uuid())
+  tenantId     String    @map("tenant_id")
+  supplierId   String    @map("supplier_id")
+  poNumber     String    @map("po_number")
+  status       String    @default("DRAFT")
+                         // DRAFT | SENT | ACKNOWLEDGED | PART_RECEIVED | CLOSED
+  poDate       DateTime  @map("po_date")
+  expectedDate DateTime  @map("expected_date")
+  remarks      String?
+  sentAt       DateTime? @map("sent_at")
+  createdById  String    @map("created_by_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt      @map("updated_at")
+
+  supplier     Supplier      @relation(fields: [supplierId], references: [id])
+  lines        PurchaseOrderLine[]
+  grns         Grn[]
+
+  @@index([tenantId, supplierId])
+  @@index([tenantId, status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLine {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  poId        String  @map("po_id")
+  itemId      String  @map("item_id")
+  description String?
+  qty         Float
+  unit        String
+  rate        Float
+  hsnCode     String? @map("hsn_code")
+  gstPct      Float   @default(18) @map("gst_pct")
+  receivedQty Float   @default(0)  @map("received_qty")
+
+  po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, poId])
+  @@map("purchase_order_lines")
+}
+
+// ── GRN domain ─────────────────────────────────────────────────────────────
+
+model Grn {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  supplierId  String    @map("supplier_id")
+  poId        String?   @map("po_id")
+  grnNumber   String    @map("grn_number")
+  status      String    @default("DRAFT")
+                        // DRAFT | POSTED | CANCELLED
+  grnDate     DateTime  @map("grn_date")
+  invoiceNo   String?   @map("invoice_no")
+  remarks     String?
+  createdById String    @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt      @map("updated_at")
+
+  supplier    Supplier       @relation(fields: [supplierId], references: [id])
+  po          PurchaseOrder? @relation(fields: [poId],       references: [id])
+  lines       GrnLine[]
+
+  @@index([tenantId, supplierId])
+  @@index([tenantId, status])
+  @@map("grns")
+}
+
+model GrnLine {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  grnId       String  @map("grn_id")
+  itemId      String  @map("item_id")
+  description String?
+  qty         Float
+  unit        String
+  rate        Float
+  hsnCode     String? @map("hsn_code")
+  gstPct      Float   @default(18) @map("gst_pct")
+  amount      Float
+
+  grn         Grn     @relation(fields: [grnId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, grnId])
+  @@map("grn_lines")
+}
+
+
+model Item {
+  id         String  @id @default(uuid())
+  tenantId   String  @map("tenant_id")
+  code       String
+  name       String
+  unit       String
+  category   String? // FABRIC | TRIM | PACKING | FINISHED_GOODS
+  properties Json?
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("items")
+}
+
+
+// ── Order domain ───────────────────────────────────────────────────────────
+
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  IN_PRODUCTION
+  QC_PASSED
+  DISPATCHED
+  CANCELLED
+}
+
+model Order {
+  id           String      @id @default(uuid())
+  tenantId     String      @map("tenant_id")
+  buyerId      String      @map("buyer_id")
+  poNumber     String      @map("po_number")
+  status       OrderStatus @default(DRAFT)
+  deliveryDate DateTime    @map("delivery_date")
+  season       String?
+  remarks      String?
+  confirmedAt  DateTime?   @map("confirmed_at")
+  paidAt       DateTime?   @map("paid_at")
+  createdById  String      @map("created_by_id")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt      @map("updated_at")
+
+  buyer         Buyer          @relation(fields: [buyerId],  references: [id])
+  orderLines    OrderLine[]
+  shipments     Shipment[]
+  revisions     OrderRevision[]
+  invoices      Invoice[]
+  qcInspections QcInspection[]
+  delayRisk     DelayRiskScore?
+
+  @@index([tenantId, status, deliveryDate])
+  @@index([tenantId, buyerId])
+  @@map("orders")
+}
+
+model OrderLine {
+  id        String @id @default(uuid())
+  tenantId  String @map("tenant_id")
+  orderId   String @map("order_id")
+  itemId    String @map("item_id")
+  styleCode String @map("style_code")
+  qty       Int
+  sizesJson Json   @map("sizes_json")
+
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, orderId])
+  @@map("order_lines")
+}
+
+model OrderRevision {
+  id            String   @id @default(uuid())
+  tenantId      String   @map("tenant_id")
+  orderId       String   @map("order_id")
+  revisionNo    Int      @map("revision_no")
+  changedFields Json     @map("changed_fields")
+  revisedById   String   @map("revised_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("order_revisions")
+}
+
+model Shipment {
+  id           String    @id @default(uuid())
+  tenantId     String    @map("tenant_id")
+  orderId      String    @map("order_id")
+  vehicleNo    String?   @map("vehicle_no")
+  ewayBillNo   String?   @map("eway_bill_no")
+  dispatchedAt DateTime? @map("dispatched_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  order        Order     @relation(fields: [orderId], references: [id])
+
+  @@index([tenantId, orderId])
+  @@map("shipments")
+}
+
+// ── Invoice domain ─────────────────────────────────────────────────────────
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum InvoiceType {
+  SALES
+  PURCHASE
+}
+
+enum PaymentMode {
+  BANK_TRANSFER
+  CHEQUE
+  CASH
+  UPI
+}
+
+model Invoice {
+  id          String        @id @default(uuid())
+  tenantId    String        @map("tenant_id")
+  orderId     String?       @map("order_id")
+  buyerId     String?       @map("buyer_id")
+  type        InvoiceType   @default(SALES)
+  invoiceNo   String        @map("invoice_no")
+  invoiceDate DateTime      @map("invoice_date")
+  dueDate     DateTime      @map("due_date")
+  subtotal    Decimal       @db.Decimal(14, 2)
+  gstAmount   Decimal       @db.Decimal(14, 2) @map("gst_amount")
+  total       Decimal       @db.Decimal(14, 2)
+  paidAmount  Decimal       @default(0) @db.Decimal(14, 2) @map("paid_amount")
+  currency    String        @default("INR")
+  irnNumber   String?       @map("irn_number")
+  status      InvoiceStatus @default(DRAFT)
+  createdById String        @map("created_by_id")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt      @map("updated_at")
+
+  order       Order?        @relation(fields: [orderId], references: [id])
+  buyer       Buyer?        @relation(fields: [buyerId], references: [id])
+  lines       InvoiceLine[]
+  payments    Payment[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, buyerId])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  invoiceId   String  @map("invoice_id")
+  description String
+  hsnCode     String? @map("hsn_code")
+  qty         Float
+  rate        Decimal @db.Decimal(14, 2)
+  gstPct      Float   @map("gst_pct")
+  amount      Decimal @db.Decimal(14, 2)
+
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, invoiceId])
+  @@map("invoice_lines")
+}
+
+model Payment {
+  id         String      @id @default(uuid())
+  tenantId   String      @map("tenant_id")
+  invoiceId  String      @map("invoice_id")
+  amount     Decimal     @db.Decimal(14, 2)
+  mode       PaymentMode
+  reference  String?
+  paidAt     DateTime    @map("paid_at")
+  createdAt  DateTime    @default(now()) @map("created_at")
+
+  invoice    Invoice     @relation(fields: [invoiceId], references: [id])
+
+  @@index([tenantId, invoiceId])
+  @@map("payments")
+}
+
+// ── QC domain (referenced by Order) ───────────────────────────────────────
+
+model QcInspection {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  orderId     String   @map("order_id")
+  styleCode   String   @map("style_code")
+  inspectorId String   @map("inspector_id")
+  inspType    String   @map("insp_type")
+  result      String
+  aqlLevel    String?  @map("aql_level")
+  sampleSize  Int?     @map("sample_size")
+  defectCount Int      @default(0) @map("defect_count")
+  photoUrls   Json     @default("[]") @map("photo_urls")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  order       Order    @relation(fields: [orderId], references: [id])
+
+  @@index([tenantId, orderId])
+  @@map("qc_inspections")
+}
+
+// ── Delay risk (referenced by Order) ──────────────────────────────────────
+
+model DelayRiskScore {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  orderId           String   @unique @map("order_id")
+  riskScore         Float    @map("risk_score")
+  riskLabel         String   @map("risk_label")
+  factors           Json
+  recommendedAction String?  @map("recommended_action")
+  calculatedAt      DateTime @default(now()) @map("calculated_at")
+
+  order             Order    @relation(fields: [orderId], references: [id])
+
+  @@map("delay_risk_scores")
+}

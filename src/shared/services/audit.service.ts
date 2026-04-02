@@ -1,46 +1,17 @@
 // src/shared/services/audit.service.ts
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma }             from '@prisma/client';
 import { PrismaService }      from '../prisma/prisma.service';
 
-// ── AuditService ──────────────────────────────────────────────────────────
-// Every data mutation must be logged here.
-// The audit_log table is immutable — no UPDATE or DELETE ever runs on it.
-// Retention: 7 years (regulatory requirement for financial records).
-//
-// Call this from every service method that creates, updates, or deletes data.
-//
-// Usage:
-//   await this.auditService.log({
-//     tenantId:  tenantId,
-//     userId:    userId,
-//     action:    'CONFIRM_ORDER',
-//     tableName: 'orders',
-//     recordId:  orderId,
-//     oldValues: { status: 'DRAFT' },
-//     newValues: { status: 'CONFIRMED' },
-//     ipAddress: request.ip,
-//   });
-
 export type AuditAction =
-  | 'CREATE'
-  | 'UPDATE'
-  | 'DELETE'
-  | 'CONFIRM_ORDER'
-  | 'CANCEL_ORDER'
-  | 'REVISE_ORDER'
-  | 'POST_GRN'
-  | 'ISSUE_STOCK'
-  | 'CONFIRM_PAYMENT'
-  | 'GENERATE_EINVOICE'
-  | 'PASS_QC'
-  | 'FAIL_QC'
-  | 'RAISE_NCR'
+  | 'CREATE' | 'UPDATE' | 'DELETE'
+  | 'CONFIRM_ORDER' | 'CANCEL_ORDER' | 'REVISE_ORDER'
+  | 'POST_GRN' | 'ISSUE_STOCK'
+  | 'CONFIRM_PAYMENT' | 'GENERATE_EINVOICE'
+  | 'PASS_QC' | 'FAIL_QC' | 'RAISE_NCR'
   | 'DISPATCH_SHIPMENT'
-  | 'LOGIN'
-  | 'LOGOUT'
-  | 'PASSWORD_RESET'
-  | 'ROLE_CHANGE'
-  | string; // extensible
+  | 'LOGIN' | 'LOGOUT' | 'PASSWORD_RESET' | 'ROLE_CHANGE'
+  | string;
 
 export interface AuditParams {
   tenantId:   string;
@@ -51,7 +22,6 @@ export interface AuditParams {
   oldValues?: Record<string, unknown>;
   newValues?: Record<string, unknown>;
   ipAddress?: string;
-  metadata?:  Record<string, unknown>;
 }
 
 @Injectable()
@@ -60,7 +30,6 @@ export class AuditService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  // ── Log a single mutation ─────────────────────────────────────────────
   async log(params: AuditParams): Promise<void> {
     try {
       await this.prisma.auditLog.create({
@@ -70,21 +39,25 @@ export class AuditService {
           action:    params.action,
           tableName: params.tableName,
           recordId:  params.recordId,
-          oldValues: params.oldValues ?? undefined,
-          newValues: params.newValues ?? undefined,
+          oldValues: params.oldValues
+            ? (params.oldValues as Prisma.InputJsonValue)
+            : undefined,
+          newValues: params.newValues
+            ? (params.newValues as Prisma.InputJsonValue)
+            : undefined,
           ipAddress: params.ipAddress,
         },
       });
     } catch (err) {
-      // Never let audit logging failures break the main operation
+      // Never let audit logging break the main operation
       this.logger.error(
-        `Failed to write audit log: ${params.action} on ${params.tableName}/${params.recordId}`,
+        `Failed to write audit log: ${params.action} on ` +
+        `${params.tableName}/${params.recordId}`,
         err,
       );
     }
   }
 
-  // ── Query audit history for a record ─────────────────────────────────
   async getHistory(
     tenantId:  string,
     tableName: string,
@@ -98,7 +71,6 @@ export class AuditService {
     });
   }
 
-  // ── Query audit history for a user ───────────────────────────────────
   async getUserActivity(
     tenantId: string,
     userId:   string,

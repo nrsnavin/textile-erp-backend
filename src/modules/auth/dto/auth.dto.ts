@@ -9,25 +9,25 @@ import {
 export class LoginDto {
   @ApiProperty({ example: 'user@factory.com' })
   @IsEmail({}, { message: 'Please enter a valid email address' })
-  email: string;
+  email!: string;
 
   @ApiProperty({ example: 'SecurePass123!' })
   @IsString()
   @MinLength(8, { message: 'Password must be at least 8 characters' })
-  password: string;
+  password!: string;
 }
 
 // ── Verify OTP (MFA step) ─────────────────────────────────────────────────
 export class VerifyOtpDto {
   @ApiProperty({ description: 'Temporary token received after successful password check' })
   @IsString()
-  tempToken: string;
+  tempToken!: string;
 
   @ApiProperty({ example: '123456', description: '6-digit OTP sent to email' })
   @IsString()
   @Length(6, 6, { message: 'OTP must be exactly 6 digits' })
   @Matches(/^\d{6}$/, { message: 'OTP must contain only digits' })
-  otp: string;
+  otp!: string;
 }
 
 // ── Register ──────────────────────────────────────────────────────────────
@@ -36,11 +36,11 @@ export class RegisterDto {
   @IsString()
   @MinLength(2)
   @MaxLength(100)
-  name: string;
+  name!: string;
 
   @ApiProperty({ example: 'user@factory.com' })
   @IsEmail()
-  email: string;
+  email!: string;
 
   @ApiProperty({ example: 'SecurePass123!' })
   @IsString()
@@ -49,11 +49,11 @@ export class RegisterDto {
     /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
     { message: 'Password must have uppercase, lowercase, number and special character' }
   )
-  password: string;
+  password!: string;
 
   @ApiProperty()
   @IsUUID()
-  tenantId: string;
+  tenantId!: string;
 
   @ApiPropertyOptional({ default: ['MERCHANDISER'] })
   @IsOptional()
@@ -65,21 +65,21 @@ export class RegisterDto {
 export class RefreshTokenDto {
   @ApiProperty()
   @IsString()
-  refreshToken: string;
+  refreshToken!: string;
 }
 
 // ── Forgot password ───────────────────────────────────────────────────────
 export class ForgotPasswordDto {
   @ApiProperty({ example: 'user@factory.com' })
   @IsEmail()
-  email: string;
+  email!  : string;
 }
 
 // ── Reset password ────────────────────────────────────────────────────────
 export class ResetPasswordDto {
   @ApiProperty({ description: 'Token received in email' })
   @IsString()
-  token: string;
+  token!: string;
 
   @ApiProperty({ example: 'NewSecurePass123!' })
   @IsString()
@@ -88,14 +88,14 @@ export class ResetPasswordDto {
     /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
     { message: 'Password must have uppercase, lowercase, number and special character' }
   )
-  newPassword: string;
+  newPassword!: string;
 }
 
 // ── Change password ───────────────────────────────────────────────────────
 export class ChangePasswordDto {
   @ApiProperty()
   @IsString()
-  currentPassword: string;
+  currentPassword!: string;
 
   @ApiProperty()
   @IsString()
@@ -104,12 +104,12 @@ export class ChangePasswordDto {
     /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
     { message: 'Password must have uppercase, lowercase, number and special character' }
   )
-  newPassword: string;
+  newPassword!: string;
 }
 
 // ── Resend OTP ────────────────────────────────────────────────────────────
 export class ResendOtpDto {
   @ApiProperty()
   @IsString()
-  tempToken: string;
+  tempToken! : string;
 }
