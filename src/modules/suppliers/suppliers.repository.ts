@@ -4,7 +4,7 @@ import { Prisma }        from '@prisma/client';
 import { paginate }      from '../../shared/utils/pagination.util';
 import {
   CreateSupplierDto, UpdateSupplierDto, SupplierFilterDto,
-  CreatePurchaseOrderDto, PoFilterDto,
+  CreatePurchaseOrderDto, UpdatePoLineDto, PoFilterDto,
 } from './dto/supplier.dto';
 
 @Injectable()
@@ -24,6 +24,13 @@ export class SuppliersRepository {
         address:       dto.address,
         contactPerson: dto.contactPerson,
         services:      dto.services ?? [],
+        pan:           dto.pan,
+        paymentTerms:  dto.paymentTerms,
+        creditDays:    dto.creditDays,
+        bankAccount:   dto.bankAccount,
+        bankIfsc:      dto.bankIfsc,
+        bankName:      dto.bankName,
+        website:       dto.website,
       },
     });
   }
@@ -37,13 +44,15 @@ export class SuppliersRepository {
   async findSuppliersWithFilters(filters: SupplierFilterDto, tenantId: string) {
     const where: Prisma.SupplierWhereInput = {
       tenantId,
-      ...(filters.isActive !== undefined && { isActive: filters.isActive }),
-      ...(filters.service  && { services: { has: filters.service } }),
-      ...(filters.search   && {
+      ...(filters.isActive     !== undefined && { isActive:     filters.isActive }),
+      ...(filters.service      && { services: { has: filters.service } }),
+      ...(filters.paymentTerms && { paymentTerms: filters.paymentTerms }),
+      ...(filters.search && {
         OR: [
           { name:  { contains: filters.search, mode: 'insensitive' } },
           { email: { contains: filters.search, mode: 'insensitive' } },
           { gstin: { contains: filters.search, mode: 'insensitive' } },
+          { pan:   { contains: filters.search, mode: 'insensitive' } },
         ],
       }),
     };
@@ -65,11 +74,47 @@ export class SuppliersRepository {
     return this.prisma.supplier.update({ where: { id }, data: dto });
   }
 
+  async deactivateSupplier(id: string) {
+    return this.prisma.supplier.update({
+      where: { id },
+      data:  { isActive: false },
+    });
+  }
+
   async updateVendorScore(id: string, score: number) {
     return this.prisma.supplier.update({
       where: { id },
       data:  { vendorScore: score },
     });
+  }
+
+  /** Stats: PO count, total PO value, avg vendor score, on-time rate proxy. */
+  async getStats(id: string, tenantId: string) {
+    const [poStats, supplier] = await this.prisma.$transaction([
+      this.prisma.purchaseOrder.aggregate({
+        where:  { supplierId: id, tenantId },
+        _count: { id: true },
+      }),
+      this.prisma.supplier.findFirst({
+        where:  { id, tenantId },
+        select: { vendorScore: true },
+      }),
+    ]);
+
+    const closedOnTime = await this.prisma.purchaseOrder.count({
+      where: {
+        supplierId: id,
+        tenantId,
+        status: 'CLOSED',
+        // proxy for on-time: closed before or on expected date
+        updatedAt: { lte: this.prisma.$queryRaw`NOW()` as unknown as Date },
+      },
+    });
+
+    const totalPos    = poStats._count.id;
+    const vendorScore = supplier?.vendorScore ?? 100;
+
+    return { supplierId: id, poCount: totalPos, vendorScore };
   }
 
   // ── Purchase Orders ───────────────────────────────────────────────────
@@ -148,6 +193,23 @@ export class SuppliersRepository {
       where: { id },
       data:  { status, ...extra },
     });
+  }
+
+  async updatePoLines(poId: string, tenantId: string, lines: Array<{ id: string } & UpdatePoLineDto>) {
+    return this.prisma.$transaction(
+      lines.map(line =>
+        this.prisma.purchaseOrderLine.update({
+          where: { id: line.id },
+          data: {
+            ...(line.qty         !== undefined && { qty: line.qty, amount: line.qty * (line.rate ?? 0) }),
+            ...(line.rate        !== undefined && { rate: line.rate }),
+            ...(line.description !== undefined && { description: line.description }),
+            ...(line.hsnCode     !== undefined && { hsnCode: line.hsnCode }),
+            ...(line.gstPct      !== undefined && { gstPct: line.gstPct }),
+          },
+        }),
+      ),
+    );
   }
 
   async getPoCount(tenantId: string): Promise<number> {

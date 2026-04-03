@@ -25,7 +25,12 @@ export class BuyersService {
     await this.audit.log({
       tenantId, userId,
       action: 'CREATE', tableName: 'buyers', recordId: buyer.id,
-      newValues: { name: buyer.name, country: buyer.country },
+      newValues: {
+        name:         buyer.name,
+        country:      buyer.country,
+        paymentTerms: buyer.paymentTerms,
+        segment:      buyer.segment,
+      },
     });
     return buyer;
   }
@@ -37,8 +42,8 @@ export class BuyersService {
     await this.audit.log({
       tenantId, userId,
       action: 'UPDATE', tableName: 'buyers', recordId: id,
-      oldValues: { name: existing.name },
-      newValues: { name: updated.name },
+      oldValues: { name: existing.name, country: existing.country },
+      newValues: { name: updated.name, country: updated.country },
     });
     return updated;
   }
@@ -50,7 +55,35 @@ export class BuyersService {
     await this.audit.log({
       tenantId, userId,
       action: 'DELETE', tableName: 'buyers', recordId: id,
+      oldValues: { name: existing.name, isActive: true },
+      newValues: { isActive: false },
     });
     return { message: 'Buyer deactivated successfully' };
+  }
+
+  async reactivateBuyer(id: string, tenantId: string, userId: string) {
+    const existing = await this.repo.findById(id, tenantId);
+    if (!existing) throw new NotFoundException(`Buyer ${id} not found`);
+    const updated = await this.repo.reactivate(id, tenantId);
+    await this.audit.log({
+      tenantId, userId,
+      action: 'UPDATE', tableName: 'buyers', recordId: id,
+      oldValues: { isActive: false },
+      newValues: { isActive: true },
+    });
+    return updated;
+  }
+
+  async getBuyerStats(id: string, tenantId: string) {
+    const buyer = await this.repo.findById(id, tenantId);
+    if (!buyer) throw new NotFoundException(`Buyer ${id} not found`);
+    const stats = await this.repo.getStats(id, tenantId);
+    return { buyerId: id, ...stats };
+  }
+
+  async getBuyerAuditHistory(id: string, tenantId: string) {
+    const buyer = await this.repo.findById(id, tenantId);
+    if (!buyer) throw new NotFoundException(`Buyer ${id} not found`);
+    return this.audit.getHistory(tenantId, 'buyers', id);
   }
 }
