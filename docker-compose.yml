@@ -1,4 +1,6 @@
 services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16
     environment:
@@ -10,60 +12,100 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d textile_erp"]
       interval: 10s
-      retries: 5
+      timeout:  5s
+      retries:  5
+      start_period: 10s
+    restart: unless-stopped
 
+  # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --requirepass redispassword
+    command: redis-server --requirepass redispassword --loglevel warning
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redispassword", "ping"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 5s
+    restart: unless-stopped
 
+  # ── Zookeeper (Kafka dependency) ───────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME:   2000
     ports:
       - "2181:2181"
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 15s
+    restart: unless-stopped
 
+  # ── Kafka ──────────────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.5.0
-    depends_on: [zookeeper]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_BROKER_ID:                        1
+      KAFKA_ZOOKEEPER_CONNECT:                zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS:             PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:   PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME:       PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE:        "true"
+      KAFKA_LOG_RETENTION_HOURS:              168
     ports:
       - "9092:9092"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"
+      interval: 15s
+      timeout:  10s
+      retries:  5
+      start_period: 30s
+    restart: unless-stopped
 
+  # ── Adminer (DB UI) ────────────────────────────────────────────────────────
   adminer:
     image: adminer
     ports:
       - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
-  # ── NestJS API ──────────────────────────────────────────────────────────
+  # ── NestJS API ─────────────────────────────────────────────────────────────
   api:
     build:
-      context: .
+      context:    .
       dockerfile: Dockerfile
-      target: development
+      target:     development
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     environment:
-      NODE_ENV:      development
-      PORT:          3008
-      DATABASE_URL:  postgresql://postgres:postgres@postgres:5432/textile_erp
-      REDIS_URL:     redis://:redispassword@redis:6379
-      KAFKA_BROKERS: kafka:29092
-      JWT_SECRET:    dev-secret-change-in-production
+      NODE_ENV:       development
+      PORT:           3008
+      DATABASE_URL:   postgresql://postgres:postgres@postgres:5432/textile_erp
+      REDIS_URL:      redis://:redispassword@redis:6379
+      KAFKA_BROKERS:  kafka:29092
+      JWT_SECRET:     dev-secret-change-in-production
       ML_SERVICE_URL: http://ml:8000
     ports:
       - "3008:3008"
@@ -71,13 +113,14 @@ services:
       - .:/app
       - /app/node_modules
     command: npm run dev
+    restart: unless-stopped
 
-  # ── Next.js Web ─────────────────────────────────────────────────────────
+  # ── Next.js Web ────────────────────────────────────────────────────────────
   web:
     build:
-      context: ../textile-erp-web
+      context:    ../textile-erp-web
       dockerfile: Dockerfile
-      target: development
+      target:     development
     depends_on:
       - api
     environment:
@@ -93,6 +136,7 @@ services:
       - /app/node_modules
       - /app/.next
     command: npm run dev
+    restart: unless-stopped
 
 volumes:
   postgres_data:
