@@ -44,7 +44,8 @@ export class LocalTokenProvider implements ITokenProvider {
     // Falls back to user.roles[] (denormalised cache) if no UserRole rows
     // exist yet (e.g. legacy seed accounts or just-registered users whose
     // UserRole rows are created in the same transaction).
-    const userRoles = await this.prisma.userRole.findMany({
+    const prismaAny = this.prisma as any;
+    const userRoles: any[] = await prismaAny.userRole.findMany({
       where:   {
         userId: user.id,
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
@@ -52,14 +53,14 @@ export class LocalTokenProvider implements ITokenProvider {
       include: { role: { select: { name: true, permissions: true, isActive: true } } },
     });
 
-    const activeUserRoles = userRoles.filter(ur => ur.role.isActive);
+    const activeUserRoles = userRoles.filter((ur: any) => ur.role.isActive);
 
     const roles: string[] = activeUserRoles.length > 0
-      ? activeUserRoles.map(ur => ur.role.name)
+      ? activeUserRoles.map((ur: any) => ur.role.name)
       : (user.roles ?? []);
 
     const permissions: string[] = Array.from(
-      new Set(activeUserRoles.flatMap(ur => ur.role.permissions)),
+      new Set(activeUserRoles.flatMap((ur: any) => ur.role.permissions as string[])),
     );
 
     const payload = {
