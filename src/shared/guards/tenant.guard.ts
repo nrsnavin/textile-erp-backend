@@ -41,10 +41,17 @@ export class TenantGuard implements CanActivate {
 
     // enterWith() sets the store for the duration of this async context.
     // All code in the same request (service calls, repo calls, Prisma queries)
-    // will see this tenantId when they call tenantStorage.getStore().
-    tenantStorage.enterWith({ tenantId });
+    // will see this context when they call tenantStorage.getStore().
+    //
+    // userId and role are also forwarded so PrismaService can set:
+    //   app.current_user_id   — enables user self-access RLS policies
+    //   app.current_role      — enables OWNER-bypass RLS policies
+    const userId = request.user?.id ?? request.user?.sub;
+    const role   = request.user?.roles?.[0] ?? '';   // highest role in JWT
 
-    this.logger.debug(`Tenant context set: ${tenantId}`);
+    tenantStorage.enterWith({ tenantId, userId, role });
+
+    this.logger.debug(`Tenant context set: ${tenantId} user=${userId} role=${role}`);
     return true;
   }
 }
