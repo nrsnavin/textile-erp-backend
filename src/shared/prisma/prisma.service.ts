@@ -5,13 +5,25 @@ import {
 import { PrismaClient } from '@prisma/client';
 import { AsyncLocalStorage } from 'async_hooks';
 
-// ── Tenant context storage ─────────────────────────────────────────────────
+// ── Tenant / user context storage ─────────────────────────────────────────
+//
 // Shared across the entire async call chain per request.
-// TenantGuard calls tenantStorage.enterWith({ tenantId })
-// PrismaService middleware reads it and sets app.tenant_id in PostgreSQL.
-// This triggers Row Level Security policies on every query automatically.
+// TenantGuard calls tenantStorage.enterWith({ tenantId, userId, role })
+// PrismaService middleware reads the store and sets PostgreSQL session
+// variables before every query so RLS policies can filter rows automatically.
+//
+// Variables set per query:
+//   app.current_tenant_id  →  used by all tenant-scoped RLS policies
+//   app.current_user_id    →  used by user self-access policies
+//   app.current_role       →  used by OWNER-bypass policies
 
-export const tenantStorage = new AsyncLocalStorage<{ tenantId: string }>();
+export interface TenantContext {
+  tenantId: string;
+  userId?:  string;   // set after JWT is validated
+  role?:    string;   // highest role name, e.g. 'OWNER'
+}
+
+export const tenantStorage = new AsyncLocalStorage<TenantContext>();
 
 @Injectable()
 export class PrismaService
@@ -35,15 +47,25 @@ export class PrismaService
     });
 
     // ── RLS middleware — runs BEFORE every Prisma query ──────────────────
-    // Sets the PostgreSQL session variable app.tenant_id
-    // PostgreSQL RLS policies use this to filter rows automatically.
-    // Even if application code forgets a WHERE tenant_id clause,
-    // the database enforces isolation independently.
+    //
+    // Sets three PostgreSQL session variables (LOCAL = transaction-scoped):
+    //
+    //   app.current_tenant_id  → tenant boundary enforcement
+    //   app.current_user_id    → self-access policy (e.g. GET /me)
+    //   app.current_role       → OWNER bypass policy
+    //
+    // Even if application code forgets a WHERE tenant_id = ? clause, the
+    // database-level RLS policy enforces isolation independently.
+    // Using SET LOCAL ensures the variable is cleared when the transaction
+    // ends, preventing context leakage across connection-pool reuse.
     this.$use(async (params, next) => {
       const store = tenantStorage.getStore();
       if (store?.tenantId) {
         await this.$executeRaw`
-          SELECT set_config('app.tenant_id', ${store.tenantId}::text, true)
+          SELECT
+            set_config('app.current_tenant_id', ${store.tenantId}::text, true),
+            set_config('app.current_user_id',   ${store.userId  ?? ''}::text, true),
+            set_config('app.current_role',       ${store.role    ?? ''}::text, true)
         `;
       }
       return next(params);

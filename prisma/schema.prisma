@@ -7,36 +7,188 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ── Tenant plan / status enums ─────────────────────────────────────────────
+
+enum TenantPlan {
+  STARTER    // ≤5 users, core modules only
+  GROWTH     // ≤20 users, all modules
+  ENTERPRISE // Unlimited users, custom integrations, SLA
+}
+
+enum TenantStatus {
+  TRIAL      // 14-day free trial, no billing required
+  ACTIVE     // Paid subscription, all features available
+  SUSPENDED  // Payment failure or admin hold — read-only access
+  CANCELLED  // Churned — data retained for 90 days
+}
+
+// ── Tenant — company / workspace ──────────────────────────────────────────
+
 model Tenant {
-  id        String   @id @default(uuid())
-  name      String
-  slug      String   @unique
-  createdAt DateTime @default(now())
+  id           String       @id @default(uuid())
+  name         String
+  slug         String       @unique
+
+  // Subscription
+  plan         TenantPlan   @default(STARTER)
+  status       TenantStatus @default(TRIAL)
+  trialEndsAt  DateTime?    @map("trial_ends_at")
+  subscribedAt DateTime?    @map("subscribed_at")
+  planRenewalAt DateTime?   @map("plan_renewal_at")
+
+  // Business identity
+  industry     String?                        // GARMENTS | FABRIC | YARN | ACCESSORIES
+  country      String       @default("IN")
+  timezone     String       @default("Asia/Kolkata")
+  currency     String       @default("INR")
+  logoUrl      String?      @map("logo_url")
+  website      String?
+  gstin        String?                        // Company-level GSTIN
+  pan          String?                        // Company PAN
+
+  // Limits (plan-enforced)
+  maxUsers     Int          @default(5)       @map("max_users")
+
+  createdAt    DateTime     @default(now())   @map("created_at")
+  updatedAt    DateTime     @updatedAt        @map("updated_at")
+
+  users        User[]
+  roles        Role[]
+  config       TenantConfig[]
+
   @@map("tenants")
 }
 
-// ADD THESE MODELS TO YOUR EXISTING prisma/schema.prisma
-// These extend the auth capabilities beyond the basic User model
+// ── Config category enum ──────────────────────────────────────────────────
+
+enum ConfigCategory {
+  GENERAL        // Display name, logo URL, timezone, date format
+  NOTIFICATIONS  // Email alerts, WhatsApp opt-ins, escalation rules
+  INTEGRATIONS   // AWS S3 bucket, Kafka topics, Interakt key aliases
+  BILLING        // Invoice prefix, GST rates, payment gateway IDs
+  WORKFLOW       // Auto-close rules, approval thresholds, lead times
+  FEATURES       // Feature flags — enable/disable modules per tenant
+}
+
+// ── TenantConfig — per-tenant key-value configuration ─────────────────────
+//
+// A flat key-value store grouped by category.  The `value` column is Json
+// so it can hold strings, numbers, booleans, arrays, or nested objects.
+//
+// Naming convention for keys: <category>.<domain>.<setting>
+//   e.g.  "billing.invoice.prefix"  →  "INV"
+//         "features.qc.enabled"     →  true
+//         "notifications.email.poDispatched"  →  ["owner@co.in"]
+//
+// isPublic=true entries are safe to forward to the frontend without
+// exposing sensitive integration credentials.
+
+model TenantConfig {
+  id          String         @id @default(uuid())
+  tenantId    String         @map("tenant_id")
+  category    ConfigCategory
+  key         String                           // unique within tenant
+  value       Json                             // string | number | boolean | array | object
+  description String?                          // human-readable note for admin UI
+  isPublic    Boolean        @default(false)   @map("is_public")
+  isEncrypted Boolean        @default(false)   @map("is_encrypted") // value stored AES-256 if true
+  createdAt   DateTime       @default(now())   @map("created_at")
+  updatedAt   DateTime       @updatedAt        @map("updated_at")
+
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+  @@index([tenantId, category])
+  @@map("tenant_config")
+}
+
+// ── Role — named permission bundle ────────────────────────────────────────
+//
+// System roles (tenantId = null) are seeded once and shared across all
+// tenants.  Tenants may create additional custom roles (tenantId set).
+//
+// Permissions use resource:action syntax:
+//   buyers:read      buyers:write     buyers:delete
+//   suppliers:read   suppliers:write
+//   orders:read      orders:confirm   orders:cancel    orders:revise
+//   invoices:read    invoices:create  invoices:approve invoices:void
+//   reports:read     reports:export
+//   settings:read    settings:write
+//   users:read       users:write      users:assign-roles
+//   audit:read
+
+model Role {
+  id          String    @id @default(uuid())
+  tenantId    String?   @map("tenant_id")       // null = system-wide role
+  name        String                            // e.g. "OWNER", "ACCOUNTANT"
+  description String?
+  permissions String[]                          // ["buyers:read","orders:confirm", …]
+  isSystem    Boolean   @default(false)  @map("is_system")   // system roles cannot be deleted
+  isActive    Boolean   @default(true)   @map("is_active")
+  createdAt   DateTime  @default(now())  @map("created_at")
+  updatedAt   DateTime  @updatedAt       @map("updated_at")
+
+  tenant      Tenant?   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userRoles   UserRole[]
+
+  @@unique([tenantId, name])               // system roles: (null, "OWNER") is unique
+  @@index([tenantId])
+  @@map("roles")
+}
+
+// ── UserRole — assignment junction ───────────────────────────────────────
+//
+// A user can hold multiple roles within a tenant.
+// The `roles String[]` on User is a denormalised cache for fast JWT reads;
+// this table is the authoritative source and is reconciled on every login.
+
+model UserRole {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  roleId       String    @map("role_id")
+  tenantId     String    @map("tenant_id")     // denormalised for quick tenant-scoped queries
+  assignedById String?   @map("assigned_by_id")
+  assignedAt   DateTime  @default(now())  @map("assigned_at")
+  expiresAt    DateTime? @map("expires_at")    // optional time-boxed access
+
+  user         User      @relation(fields: [userId],  references: [id], onDelete: Cascade)
+  role         Role      @relation(fields: [roleId],  references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([tenantId, userId])
+  @@index([tenantId, roleId])
+  @@map("user_roles")
+}
+
+// ── User ──────────────────────────────────────────────────────────────────
 
 model User {
-  id              String    @id @default(uuid())
-  tenantId        String    @map("tenant_id")
-  email           String
-  name            String
-  passwordHash    String    @map("password_hash")
-  roles           String[]
-  isActive        Boolean   @default(true)  @map("is_active")
-  isEmailVerified Boolean   @default(false) @map("is_email_verified")
-  isMfaEnabled    Boolean   @default(false) @map("is_mfa_enabled")
-  lastLoginAt     DateTime? @map("last_login_at")
-  failedLoginCount Int      @default(0)     @map("failed_login_count")
-  lockedUntil     DateTime? @map("locked_until")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt      @map("updated_at")
+  id               String    @id @default(uuid())
+  tenantId         String    @map("tenant_id")
+  email            String
+  name             String
+  passwordHash     String    @map("password_hash")
 
-  otpCodes        OtpCode[]
-  refreshTokens   RefreshToken[]
-  passwordResets  PasswordReset[]
+  // Denormalised role cache — kept in sync with UserRole on every login/
+  // role-assignment.  Used directly in JWT payload so the auth hot-path
+  // never needs a roles join.  Always derived from UserRole — do not edit
+  // this column directly; go through the UserRole table.
+  roles            String[]
+
+  isActive         Boolean   @default(true)   @map("is_active")
+  isEmailVerified  Boolean   @default(false)  @map("is_email_verified")
+  isMfaEnabled     Boolean   @default(false)  @map("is_mfa_enabled")
+  lastLoginAt      DateTime? @map("last_login_at")
+  failedLoginCount Int       @default(0)      @map("failed_login_count")
+  lockedUntil      DateTime? @map("locked_until")
+  createdAt        DateTime  @default(now())  @map("created_at")
+  updatedAt        DateTime  @updatedAt       @map("updated_at")
+
+  tenant           Tenant         @relation(fields: [tenantId], references: [id])
+  userRoles        UserRole[]
+  otpCodes         OtpCode[]
+  refreshTokens    RefreshToken[]
+  passwordResets   PasswordReset[]
 
   @@unique([tenantId, email])
   @@index([tenantId])

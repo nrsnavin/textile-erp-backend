@@ -9,7 +9,7 @@ export { PrismaModule }                 from './prisma/prisma.module';
 // ── Guards ────────────────────────────────────────────────────────────────
 export { JwtAuthGuard, IS_PUBLIC_KEY }  from './guards/jwt-auth.guard';
 export { TenantGuard }                  from './guards/tenant.guard';
-export { RolesGuard, Role }             from './guards/roles.guard';
+export { RolesGuard, Role, Permission, PermissionString } from './guards/roles.guard';
 export { CustomThrottlerGuard }         from './guards/throttler.guard';
 
 // ── Decorators ────────────────────────────────────────────────────────────
@@ -23,6 +23,7 @@ export {
   AuthUser,
 }                                       from './decorators/current-user.decorator';
 export { ApiAuth }                      from './decorators/api-auth.decorator';
+export { RequirePermissions, PERMISSIONS_KEY } from './decorators/permissions.decorator';
 
 // ── Filters ───────────────────────────────────────────────────────────────
 export { GlobalExceptionFilter }        from './filters/global-exception.filter';
