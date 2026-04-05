@@ -14,7 +14,9 @@ export class SuppliersRepository {
   // ── Suppliers ─────────────────────────────────────────────────────────
 
   async createSupplier(dto: CreateSupplierDto, tenantId: string) {
-    return this.prisma.supplier.create({
+    // Cast to any — new fields (pan, paymentTerms, bankAccount, etc.) are not
+    // in the generated Prisma client yet (run `prisma generate` after next migration).
+    return (this.prisma.supplier.create as any)({
       data: {
         tenantId,
         name:          dto.name,
@@ -42,7 +44,8 @@ export class SuppliersRepository {
   }
 
   async findSuppliersWithFilters(filters: SupplierFilterDto, tenantId: string) {
-    const where: Prisma.SupplierWhereInput = {
+    // Cast where to any — new fields (pan, paymentTerms) not in generated client yet
+    const where: any = {
       tenantId,
       ...(filters.isActive     !== undefined && { isActive:     filters.isActive }),
       ...(filters.service      && { services: { has: filters.service } }),
