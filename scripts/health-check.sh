@@ -12,7 +12,7 @@ set -euo pipefail
 
 COMPOSE_FILE="$(cd "$(dirname "$0")/.." && pwd)/docker-compose.yml"
 TIMEOUT="${TIMEOUT:-120}"
-SERVICES=(postgres redis kafka)
+SERVICES=(postgres redis kafka)   # zookeeper removed — Kafka runs in KRaft mode
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -21,8 +21,8 @@ success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # ── Start infra services (not api/web) ────────────────────────────────────────
-info "Starting infrastructure services (postgres, redis, zookeeper, kafka)..."
-docker compose -f "$COMPOSE_FILE" up -d postgres redis zookeeper kafka
+info "Starting infrastructure services (postgres, redis, kafka)..."
+docker compose -f "$COMPOSE_FILE" up -d postgres redis kafka
 
 # ── Poll until healthy ────────────────────────────────────────────────────────
 wait_healthy() {
@@ -79,7 +79,7 @@ echo ""
 if [ "$FAILED" -eq 0 ]; then
   success "All infrastructure services are healthy!"
   echo ""
-  docker compose -f "$COMPOSE_FILE" ps postgres redis zookeeper kafka
+  docker compose -f "$COMPOSE_FILE" ps postgres redis kafka
   exit 0
 else
   error "One or more services failed to become healthy. See logs above."
