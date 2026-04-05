@@ -40,7 +40,7 @@ ALTER TABLE "tenants"
 
 -- Back-fill trial_ends_at for existing rows (14 days from creation)
 UPDATE "tenants"
-   SET "trial_ends_at" = "createdAt" + INTERVAL '14 days'
+   SET "trial_ends_at" = "created_at" + INTERVAL '14 days'
  WHERE "trial_ends_at" IS NULL;
 
 -- 3. TenantConfig ─────────────────────────────────────────────────────────────
