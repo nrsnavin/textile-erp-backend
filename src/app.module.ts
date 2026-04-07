@@ -4,6 +4,8 @@ import { ThrottlerModule }    from '@nestjs/throttler';
 import { AuthModule }         from './modules/auth/auth.module';
 import { BuyersModule }       from './modules/buyer/buyer.module';
 import { SuppliersModule }    from './modules/suppliers/suppliers.module';
+import { OrdersModule }       from './modules/orders/orders.module';
+import { InventoryModule }    from './modules/inventory/inventory.module';
 import { HealthController }   from './shared/health.controller';
 
 @Module({
@@ -13,6 +15,8 @@ import { HealthController }   from './shared/health.controller';
     AuthModule,
     BuyersModule,
     SuppliersModule,
+    OrdersModule,
+    InventoryModule,
   ],
   controllers: [HealthController],
 })
