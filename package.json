@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "cross-env NODE_OPTIONS=--max-old-space-size=2048 nest start --watch",
+    "dev": "node --max-old-space-size=4096 dist/main",
+    "dev:compile": "nest build --watch",
     "build": "nest build",
     "start": "node dist/main",
     "test": "jest",
