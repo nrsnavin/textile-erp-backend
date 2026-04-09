@@ -2,9 +2,15 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsString, IsOptional, IsArray, IsUUID,
   IsNumber, IsPositive, Min, ValidateNested,
+  IsIn, IsNotIn, MinLength,
 } from 'class-validator';
 import { Type }          from 'class-transformer';
 import { PaginationDto } from '../../../shared/utils/pagination.util';
+
+const LEDGER_ENTRY_TYPES = [
+  'GRN_IN', 'ISSUE_TO_PROD', 'RETURN_FROM_PROD',
+  'ADJUSTMENT', 'TRANSFER_IN', 'TRANSFER_OUT', 'OPENING_STOCK',
+] as const;
 
 // ── BomLineDto ────────────────────────────────────────────────────────────────
 
@@ -74,10 +80,11 @@ export class StockAdjustmentDto {
   location?: string;
 
   @ApiProperty({
-    description: 'Signed quantity — positive to add, negative to deduct',
+    description: 'Signed quantity — positive to add, negative to deduct. Must not be zero.',
     example: 50,
   })
   @IsNumber()
+  @IsNotIn([0], { message: 'qty must not be zero' })
   qty!: number;
 
   @ApiProperty({ description: 'Mandatory reason for the adjustment (audit trail)' })
@@ -150,10 +157,12 @@ export class TransferStockDto {
 
   @ApiProperty({ description: 'Source location code', example: 'WAREHOUSE-A' })
   @IsString()
+  @MinLength(1, { message: 'fromLocation must not be empty' })
   fromLocation!: string;
 
   @ApiProperty({ description: 'Destination location code', example: 'STORE-1' })
   @IsString()
+  @MinLength(1, { message: 'toLocation must not be empty' })
   toLocation!: string;
 
   @ApiProperty({ description: 'Quantity to transfer', example: 20 })
@@ -211,10 +220,10 @@ export class MovementFilterDto extends PaginationDto {
 
   @ApiPropertyOptional({
     description: 'Filter by entry type',
-    enum: ['GRN_IN','ISSUE_TO_PROD','RETURN_FROM_PROD','ADJUSTMENT','TRANSFER_IN','TRANSFER_OUT','OPENING_STOCK'],
+    enum: LEDGER_ENTRY_TYPES,
   })
   @IsOptional()
-  @IsString()
+  @IsIn(LEDGER_ENTRY_TYPES, { message: `entryType must be one of: ${LEDGER_ENTRY_TYPES.join(', ')}` })
   entryType?: string;
 
   @ApiPropertyOptional({ description: 'Filter from date (ISO 8601)', example: '2026-01-01' })
@@ -237,5 +246,6 @@ export class RebuildBalanceDto {
 
   @ApiProperty({ description: 'Warehouse location code', example: 'MAIN' })
   @IsString()
+  @MinLength(1, { message: 'location must not be empty' })
   location!: string;
 }
