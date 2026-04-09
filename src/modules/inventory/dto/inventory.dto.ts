@@ -90,6 +90,7 @@ export class StockAdjustmentDto {
   @ApiProperty({ description: 'Mandatory reason for the adjustment (audit trail)' })
   @IsString()
   reason!: string;
+
 }
 
 // ── IssueToProductionDto ──────────────────────────────────────────────────────
