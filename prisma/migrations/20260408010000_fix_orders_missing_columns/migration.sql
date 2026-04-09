@@ -17,9 +17,10 @@ ALTER TABLE orders
   ADD COLUMN IF NOT EXISTS paid_at      TIMESTAMPTZ;
 
 -- 3. Migrate status column from TEXT to OrderStatus enum
---    (safe: all existing rows will have status 'DRAFT' by default)
-ALTER TABLE orders
-  ALTER COLUMN status TYPE "OrderStatus" USING status::"OrderStatus";
+--    Must drop the DEFAULT first, cast, then restore it
+ALTER TABLE orders ALTER COLUMN status DROP DEFAULT;
+ALTER TABLE orders ALTER COLUMN status TYPE "OrderStatus" USING status::"OrderStatus";
+ALTER TABLE orders ALTER COLUMN status SET DEFAULT 'DRAFT'::"OrderStatus";
 
 -- 4. order_revisions — add changed_fields (required JSON) and revised_by_id
 ALTER TABLE order_revisions
