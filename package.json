@@ -11,7 +11,8 @@
     "lint": "eslint src/",
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "export-spec": "SPEC_EXPORT=1 npx ts-node -r tsconfig-paths/register scripts/export-spec.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",

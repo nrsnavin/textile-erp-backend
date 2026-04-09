@@ -34,12 +34,19 @@ export class PrismaService
   }
 
   async onModuleInit(): Promise<void> {
+    // Skip DB connection when only exporting the OpenAPI spec (no DB needed).
+    if (process.env['SPEC_EXPORT'] === '1') {
+      this.logger.log('Prisma: skipping connect (SPEC_EXPORT mode)');
+      return;
+    }
     await this.$connect();
     this.logger.log('Prisma connected to PostgreSQL');
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.$disconnect();
+    if (process.env['SPEC_EXPORT'] !== '1') {
+      await this.$disconnect();
+    }
     this.logger.log('Prisma disconnected');
   }
 
