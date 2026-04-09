@@ -4,7 +4,15 @@ import {
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { AuditService }  from '../../shared/services/audit.service';
 import { paginate }      from '../../shared/utils/pagination.util';
-import { CreateBomDto, StockAdjustmentDto } from './dto/inventory.dto';
+import {
+  CreateBomDto,
+  StockAdjustmentDto,
+  IssueToProductionDto,
+  ReturnFromProductionDto,
+  TransferStockDto,
+  SetOpeningStockDto,
+  MovementFilterDto,
+} from './dto/inventory.dto';
 
 @Injectable()
 export class InventoryService {
@@ -45,7 +53,6 @@ export class InventoryService {
   async createBom(dto: CreateBomDto, tenantId: string, userId: string) {
     const { lines, itemId, styleCode, remarks } = dto;
 
-    // Deactivate any previous active BOM for the same item + styleCode
     await (this.prisma as any).bom.updateMany({
       where: {
         tenantId,
@@ -116,17 +123,22 @@ export class InventoryService {
     });
   }
 
-  // ── Stock ledger (paginated) ──────────────────────────────────────────────
+  // ── Movement history (replaces getStockLedger) ────────────────────────────
 
-  async getStockLedger(
-    tenantId: string,
-    itemId:   string | undefined,
-    page:     number,
-    limit:    number,
-  ) {
+  async getMovementHistory(filters: MovementFilterDto, tenantId: string) {
+    const page  = filters.page  ?? 1;
+    const limit = filters.limit ?? 20;
     const skip  = (page - 1) * limit;
+
     const where: any = { tenantId };
-    if (itemId) where.itemId = itemId;
+    if (filters.itemId)    where.itemId    = filters.itemId;
+    if (filters.location)  where.location  = filters.location;
+    if (filters.entryType) where.entryType = filters.entryType;
+    if (filters.dateFrom || filters.dateTo) {
+      where.createdAt = {};
+      if (filters.dateFrom) where.createdAt.gte = new Date(filters.dateFrom);
+      if (filters.dateTo)   where.createdAt.lte = new Date(filters.dateTo);
+    }
 
     const [rows, total] = await Promise.all([
       (this.prisma as any).stockLedger.findMany({
@@ -141,78 +153,308 @@ export class InventoryService {
       (this.prisma as any).stockLedger.count({ where }),
     ]);
 
-    // Build a minimal PaginationDto-compatible object for the paginate helper
     return paginate(rows, total, { page, limit, skip } as any);
   }
 
-  // ── Stock adjustment ──────────────────────────────────────────────────────
+  // ── Core movement engine ──────────────────────────────────────────────────
+  //
+  // All stock writes go through this single method.
+  // qty is SIGNED: positive = stock IN, negative = stock OUT.
+  // The balance table is updated atomically alongside the ledger entry.
 
-  async adjustStock(dto: StockAdjustmentDto, tenantId: string, userId: string) {
-    const { itemId, qty, reason } = dto;
-    const location = dto.location ?? 'MAIN';
+  private async postMovement(
+    params: {
+      itemId:    string;
+      location:  string;
+      entryType: string;
+      qty:       number;   // signed
+      rate?:     number;
+      refType?:  string;
+      refId?:    string;
+      remarks?:  string;
+    },
+    tenantId: string,
+    userId:   string,
+  ) {
+    const { itemId, location, entryType, qty, rate, refType, refId, remarks } = params;
 
-    // Fetch or initialise the balance record
-    let balance = await (this.prisma as any).stockBalance.findFirst({
-      where: { tenantId, itemId, location },
-    });
-
-    const currentOnHand = balance ? Number(balance.onHand) : 0;
-    const newOnHand     = currentOnHand + Number(qty);
-
-    if (newOnHand < 0) {
-      throw new BadRequestException(
-        `Adjustment would result in negative stock (current: ${currentOnHand}, adjustment: ${qty})`,
-      );
-    }
-
-    const reserved  = balance ? Number(balance.reserved) : 0;
-    const available = newOnHand - reserved;
-
-    // Upsert balance
-    if (balance) {
-      balance = await (this.prisma as any).stockBalance.update({
-        where: { id: balance.id },
-        data:  { onHand: newOnHand, available },
+    // Use a transaction so ledger + balance are always consistent
+    return this.prisma.$transaction(async (tx: any) => {
+      // 1. Read current balance (or default zeros)
+      const balance = await tx.stockBalance.findFirst({
+        where: { tenantId, itemId, location },
       });
-    } else {
-      balance = await (this.prisma as any).stockBalance.create({
+
+      const currentOnHand = balance ? Number(balance.onHand) : 0;
+      const currentReserved = balance ? Number(balance.reserved) : 0;
+
+      // 2. Validate: prevent negative on-hand
+      const newOnHand = currentOnHand + qty;
+      if (newOnHand < 0) {
+        throw new BadRequestException(
+          `Insufficient stock for item ${itemId} at ${location}. ` +
+          `On hand: ${currentOnHand}, requested: ${Math.abs(qty)}`,
+        );
+      }
+
+      const newAvailable = newOnHand - currentReserved;
+
+      // 3. Write ledger entry
+      const ledger = await tx.stockLedger.create({
         data: {
           tenantId,
           itemId,
           location,
-          onHand:    newOnHand,
-          reserved:  0,
-          available: newOnHand,
+          entryType,
+          qty,
+          balanceQty:  newOnHand,
+          rate:        rate    ?? null,
+          refType:     refType ?? null,
+          refId:       refId   ?? null,
+          remarks:     remarks ?? null,
+          createdById: userId,
         },
       });
-    }
 
-    // Write ledger entry
-    const ledger = await (this.prisma as any).stockLedger.create({
-      data: {
-        tenantId,
-        itemId,
-        location,
-        entryType:   'ADJUSTMENT',
-        qty:         qty,
-        balanceQty:  newOnHand,
-        remarks:     reason,
-        createdById: userId,
-      },
+      // 4. Upsert balance cache
+      let updatedBalance: any;
+      if (balance) {
+        updatedBalance = await tx.stockBalance.update({
+          where: { id: balance.id },
+          data:  { onHand: newOnHand, available: newAvailable },
+        });
+      } else {
+        updatedBalance = await tx.stockBalance.create({
+          data: {
+            tenantId,
+            itemId,
+            location,
+            onHand:    newOnHand,
+            reserved:  0,
+            available: newOnHand,
+          },
+        });
+      }
+
+      return { ledger, balance: updatedBalance };
     });
+  }
+
+  // ── Public movement methods ───────────────────────────────────────────────
+
+  async adjustStock(dto: StockAdjustmentDto, tenantId: string, userId: string) {
+    const result = await this.postMovement(
+      {
+        itemId:    dto.itemId,
+        location:  dto.location ?? 'MAIN',
+        entryType: 'ADJUSTMENT',
+        qty:       dto.qty,
+        remarks:   dto.reason,
+      },
+      tenantId,
+      userId,
+    );
 
     await this.audit.log({
       tenantId, userId,
       action:    'ADJUSTMENT',
       tableName: 'stock_ledger',
-      recordId:  ledger.id,
-      newValues: { itemId, location, qty, balanceQty: newOnHand, reason },
+      recordId:  result.ledger.id,
+      newValues: { itemId: dto.itemId, location: dto.location ?? 'MAIN', qty: dto.qty, reason: dto.reason },
     });
 
-    return { balance, ledger };
+    return result;
   }
 
-  // ── Post GRN — GRN_IN ledger entries + update balances ───────────────────
+  async issueToProduction(dto: IssueToProductionDto, tenantId: string, userId: string) {
+    const result = await this.postMovement(
+      {
+        itemId:    dto.itemId,
+        location:  dto.location ?? 'MAIN',
+        entryType: 'ISSUE_TO_PROD',
+        qty:       -Math.abs(dto.qty),   // always negative (OUT)
+        refType:   dto.orderId ? 'ORDER' : undefined,
+        refId:     dto.orderId,
+        remarks:   dto.remarks,
+      },
+      tenantId,
+      userId,
+    );
+
+    await this.audit.log({
+      tenantId, userId,
+      action:    'ISSUE_TO_PROD',
+      tableName: 'stock_ledger',
+      recordId:  result.ledger.id,
+      newValues: { itemId: dto.itemId, qty: dto.qty, orderId: dto.orderId },
+    });
+
+    return result;
+  }
+
+  async returnFromProduction(dto: ReturnFromProductionDto, tenantId: string, userId: string) {
+    const result = await this.postMovement(
+      {
+        itemId:    dto.itemId,
+        location:  dto.location ?? 'MAIN',
+        entryType: 'RETURN_FROM_PROD',
+        qty:       Math.abs(dto.qty),    // always positive (IN)
+        refType:   dto.orderId ? 'ORDER' : undefined,
+        refId:     dto.orderId,
+        remarks:   dto.remarks,
+      },
+      tenantId,
+      userId,
+    );
+
+    await this.audit.log({
+      tenantId, userId,
+      action:    'RETURN_FROM_PROD',
+      tableName: 'stock_ledger',
+      recordId:  result.ledger.id,
+      newValues: { itemId: dto.itemId, qty: dto.qty, orderId: dto.orderId },
+    });
+
+    return result;
+  }
+
+  async transferStock(dto: TransferStockDto, tenantId: string, userId: string) {
+    // Two movements in one outer transaction: OUT from source, IN to destination
+    return this.prisma.$transaction(async (tx: any) => {
+      // Read source balance
+      const srcBalance = await tx.stockBalance.findFirst({
+        where: { tenantId, itemId: dto.itemId, location: dto.fromLocation },
+      });
+      const srcOnHand = srcBalance ? Number(srcBalance.onHand) : 0;
+      if (srcOnHand < dto.qty) {
+        throw new BadRequestException(
+          `Insufficient stock at ${dto.fromLocation}. On hand: ${srcOnHand}, requested: ${dto.qty}`,
+        );
+      }
+
+      // OUT movement (source)
+      const newSrcOnHand = srcOnHand - dto.qty;
+      const srcLedger = await tx.stockLedger.create({
+        data: {
+          tenantId,
+          itemId:      dto.itemId,
+          location:    dto.fromLocation,
+          entryType:   'TRANSFER_OUT',
+          qty:         -dto.qty,
+          balanceQty:  newSrcOnHand,
+          refType:     'TRANSFER',
+          refId:       dto.toLocation,
+          remarks:     dto.remarks ?? null,
+          createdById: userId,
+        },
+      });
+
+      if (srcBalance) {
+        await tx.stockBalance.update({
+          where: { id: srcBalance.id },
+          data:  { onHand: newSrcOnHand, available: newSrcOnHand - Number(srcBalance.reserved) },
+        });
+      } else {
+        await tx.stockBalance.create({
+          data: { tenantId, itemId: dto.itemId, location: dto.fromLocation, onHand: newSrcOnHand, reserved: 0, available: newSrcOnHand },
+        });
+      }
+
+      // IN movement (destination)
+      const dstBalance = await tx.stockBalance.findFirst({
+        where: { tenantId, itemId: dto.itemId, location: dto.toLocation },
+      });
+      const dstOnHand = dstBalance ? Number(dstBalance.onHand) : 0;
+      const newDstOnHand = dstOnHand + dto.qty;
+
+      const dstLedger = await tx.stockLedger.create({
+        data: {
+          tenantId,
+          itemId:      dto.itemId,
+          location:    dto.toLocation,
+          entryType:   'TRANSFER_IN',
+          qty:         dto.qty,
+          balanceQty:  newDstOnHand,
+          refType:     'TRANSFER',
+          refId:       dto.fromLocation,
+          remarks:     dto.remarks ?? null,
+          createdById: userId,
+        },
+      });
+
+      if (dstBalance) {
+        await tx.stockBalance.update({
+          where: { id: dstBalance.id },
+          data:  { onHand: newDstOnHand, available: newDstOnHand - Number(dstBalance.reserved) },
+        });
+      } else {
+        await tx.stockBalance.create({
+          data: { tenantId, itemId: dto.itemId, location: dto.toLocation, onHand: newDstOnHand, reserved: 0, available: newDstOnHand },
+        });
+      }
+
+      return { srcLedger, dstLedger };
+    });
+  }
+
+  async setOpeningStock(dto: SetOpeningStockDto, tenantId: string, userId: string) {
+    const result = await this.postMovement(
+      {
+        itemId:    dto.itemId,
+        location:  dto.location ?? 'MAIN',
+        entryType: 'OPENING_STOCK',
+        qty:       Math.abs(dto.qty),
+        rate:      dto.rate,
+        remarks:   dto.remarks,
+      },
+      tenantId,
+      userId,
+    );
+
+    await this.audit.log({
+      tenantId, userId,
+      action:    'OPENING_STOCK',
+      tableName: 'stock_ledger',
+      recordId:  result.ledger.id,
+      newValues: { itemId: dto.itemId, qty: dto.qty, rate: dto.rate },
+    });
+
+    return result;
+  }
+
+  // ── Rebuild balance from ledger (admin reconciliation) ────────────────────
+
+  async rebuildBalance(itemId: string, location: string, tenantId: string) {
+    const result = await (this.prisma as any).stockLedger.aggregate({
+      where: { tenantId, itemId, location },
+      _sum:  { qty: true },
+    });
+
+    const onHand = Number(result._sum.qty ?? 0);
+
+    // Read reserved before overwriting onHand
+    const existing = await (this.prisma as any).stockBalance.findFirst({
+      where: { tenantId, itemId, location },
+    });
+    const reserved  = existing ? Number(existing.reserved) : 0;
+    const available = onHand - reserved;
+
+    let balance: any;
+    if (existing) {
+      balance = await (this.prisma as any).stockBalance.update({
+        where: { id: existing.id },
+        data:  { onHand, available },
+      });
+    } else {
+      balance = await (this.prisma as any).stockBalance.create({
+        data: { tenantId, itemId, location, onHand, reserved: 0, available: onHand },
+      });
+    }
+
+    return { balance, rebuiltFrom: 'ledger' };
+  }
+
+  // ── Post GRN ──────────────────────────────────────────────────────────────
 
   async postGrn(grnId: string, tenantId: string, userId: string) {
     const grn = await (this.prisma as any).grn.findFirst({
@@ -230,57 +472,24 @@ export class InventoryService {
     const ledgerEntries: any[] = [];
 
     for (const line of grn.lines as any[]) {
-      const itemId    = line.itemId;
-      const qty       = Number(line.acceptedQty ?? line.qty);
-
-      // Fetch or initialise balance
-      let balance = await (this.prisma as any).stockBalance.findFirst({
-        where: { tenantId, itemId, location },
-      });
-
-      const currentOnHand = balance ? Number(balance.onHand) : 0;
-      const newOnHand     = currentOnHand + qty;
-      const reserved      = balance ? Number(balance.reserved) : 0;
-      const available     = newOnHand - reserved;
-
-      if (balance) {
-        await (this.prisma as any).stockBalance.update({
-          where: { id: balance.id },
-          data:  { onHand: newOnHand, available },
-        });
-      } else {
-        await (this.prisma as any).stockBalance.create({
-          data: {
-            tenantId,
-            itemId,
-            location,
-            onHand:    newOnHand,
-            reserved:  0,
-            available: newOnHand,
-          },
-        });
-      }
-
-      const ledger = await (this.prisma as any).stockLedger.create({
-        data: {
-          tenantId,
-          itemId,
+      const qty = Number(line.acceptedQty ?? line.qty);
+      const { ledger } = await this.postMovement(
+        {
+          itemId:    line.itemId,
           location,
-          entryType:   'GRN_IN',
+          entryType: 'GRN_IN',
           qty,
-          balanceQty:  newOnHand,
-          rate:        line.rate ?? null,
-          refType:     'GRN',
-          refId:       grnId,
-          remarks:     `GRN posting: ${grn.grnNumber ?? grnId}`,
-          createdById: userId,
+          rate:      line.rate ?? undefined,
+          refType:   'GRN',
+          refId:     grnId,
+          remarks:   `GRN posting: ${grn.grnNumber ?? grnId}`,
         },
-      });
-
+        tenantId,
+        userId,
+      );
       ledgerEntries.push(ledger);
     }
 
-    // Mark GRN as POSTED
     const updatedGrn = await (this.prisma as any).grn.update({
       where: { id: grnId },
       data:  { status: 'POSTED' },

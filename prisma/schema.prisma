@@ -381,6 +381,7 @@ model Grn {
   status      String    @default("DRAFT")
                         // DRAFT | POSTED | CANCELLED
   grnDate     DateTime  @map("grn_date")
+  location    String    @default("MAIN")
   invoiceNo   String?   @map("invoice_no")
   remarks     String?
   createdById String    @map("created_by_id")
@@ -403,6 +404,7 @@ model GrnLine {
   itemId      String  @map("item_id")
   description String?
   qty         Float
+  acceptedQty Float?  @map("accepted_qty")
   unit        String
   rate        Float
   hsnCode     String? @map("hsn_code")
