@@ -3,16 +3,24 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { AuditService }  from '../../shared/services/audit.service';
+import { KafkaService }  from '../../shared/services/kafka.service';
 import { paginate }      from '../../shared/utils/pagination.util';
 import {
   CreateOrderDto, UpdateOrderDto, OrderFilterDto,
 } from './dto/order.dto';
+
+// ── Kafka topic constants ─────────────────────────────────────────────────────
+
+const TOPIC_ORDER_CONFIRMED      = 'order.confirmed';
+const TOPIC_ORDER_STATUS_CHANGED = 'order.status-changed';
+const TOPIC_ORDER_CANCELLED      = 'order.cancelled';
 
 @Injectable()
 export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit:  AuditService,
+    private readonly kafka:  KafkaService,
   ) {}
 
   // ── List orders (paginated) ───────────────────────────────────────────────
@@ -223,6 +231,10 @@ export class OrdersService {
         status:    'CONFIRMED',
         linesJson: existing.lines,   // freeze snapshot at confirmation
       },
+      include: {
+        buyer:  { select: { id: true, name: true, country: true } },
+        lines:  true,
+      },
     });
 
     await this.audit.log({
@@ -232,6 +244,43 @@ export class OrdersService {
       recordId:  id,
       oldValues: { status: 'DRAFT' },
       newValues: { status: 'CONFIRMED' },
+    });
+
+    // ── Kafka: order.confirmed ───────────────────────────────────────────────
+    await this.kafka.emit(TOPIC_ORDER_CONFIRMED, {
+      key: tenantId,
+      value: {
+        occurredAt:   new Date().toISOString(),
+        tenantId,
+        triggeredBy:  userId,
+        orderId:      updated.id,
+        poNumber:     updated.poNumber,
+        buyerId:      updated.buyerId,
+        buyerName:    updated.buyer?.name ?? '',
+        deliveryDate: updated.deliveryDate,
+        totalQty:     updated.totalQty,
+        totalStyles:  updated.totalStyles,
+        lines: (updated.lines as any[]).map((l: any) => ({
+          styleCode: l.styleCode,
+          itemId:    l.itemId,
+          qty:       Number(l.qty),
+          colour:    l.colour ?? undefined,
+        })),
+      },
+    });
+
+    // ── Kafka: order.status-changed ──────────────────────────────────────────
+    await this.kafka.emit(TOPIC_ORDER_STATUS_CHANGED, {
+      key: tenantId,
+      value: {
+        occurredAt:  new Date().toISOString(),
+        tenantId,
+        triggeredBy: userId,
+        orderId:     updated.id,
+        poNumber:    updated.poNumber,
+        fromStatus:  'DRAFT',
+        toStatus:    'CONFIRMED',
+      },
     });
 
     return updated;
@@ -250,6 +299,8 @@ export class OrdersService {
       throw new BadRequestException('Cannot cancel a dispatched order');
     }
 
+    const prevStatus = existing.status;
+
     const updated = await (this.prisma as any).order.update({
       where: { id },
       data:  { status: 'CANCELLED' },
@@ -262,6 +313,33 @@ export class OrdersService {
       recordId:  id,
       oldValues: { status: existing.status },
       newValues: { status: 'CANCELLED' },
+    });
+
+    // ── Kafka: order.cancelled ───────────────────────────────────────────────
+    await this.kafka.emit(TOPIC_ORDER_CANCELLED, {
+      key: tenantId,
+      value: {
+        occurredAt:  new Date().toISOString(),
+        tenantId,
+        triggeredBy: userId,
+        orderId:     updated.id,
+        poNumber:    existing.poNumber,
+        prevStatus,
+      },
+    });
+
+    // ── Kafka: order.status-changed ──────────────────────────────────────────
+    await this.kafka.emit(TOPIC_ORDER_STATUS_CHANGED, {
+      key: tenantId,
+      value: {
+        occurredAt:  new Date().toISOString(),
+        tenantId,
+        triggeredBy: userId,
+        orderId:     updated.id,
+        poNumber:    existing.poNumber,
+        fromStatus:  prevStatus,
+        toStatus:    'CANCELLED',
+      },
     });
 
     return updated;
@@ -290,6 +368,20 @@ export class OrdersService {
       recordId:  id,
       oldValues: { status: 'QC_PASSED' },
       newValues: { status: 'DISPATCHED' },
+    });
+
+    // ── Kafka: order.status-changed ──────────────────────────────────────────
+    await this.kafka.emit(TOPIC_ORDER_STATUS_CHANGED, {
+      key: tenantId,
+      value: {
+        occurredAt:  new Date().toISOString(),
+        tenantId,
+        triggeredBy: userId,
+        orderId:     updated.id,
+        poNumber:    existing.poNumber,
+        fromStatus:  'QC_PASSED',
+        toStatus:    'DISPATCHED',
+      },
     });
 
     return updated;

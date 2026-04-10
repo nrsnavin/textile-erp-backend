@@ -3,6 +3,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { AuditService }  from '../../shared/services/audit.service';
+import { KafkaService }  from '../../shared/services/kafka.service';
 import { paginate, dateRangeFilter } from '../../shared/utils/pagination.util';
 import {
   CreateBomDto,
@@ -20,11 +21,16 @@ const VALID_ENTRY_TYPES = new Set([
   'ADJUSTMENT', 'TRANSFER_IN', 'TRANSFER_OUT', 'OPENING_STOCK',
 ]);
 
+// ── Kafka topic constants ─────────────────────────────────────────────────────
+const TOPIC_GRN_POSTED     = 'inventory.grn-posted';
+const TOPIC_STOCK_MOVEMENT = 'inventory.stock-movement';
+
 @Injectable()
 export class InventoryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit:  AuditService,
+    private readonly kafka:  KafkaService,
   ) {}
 
   // ── BOM ───────────────────────────────────────────────────────────────────
@@ -541,6 +547,28 @@ export class InventoryService {
       recordId:  grnId,
       oldValues: { status: grn.status },
       newValues: { status: 'POSTED', ledgerLines: ledgerEntries.length },
+    });
+
+    // ── Kafka: inventory.grn-posted ──────────────────────────────────────────
+    // Fire-and-forget — Kafka unavailability must not affect the HTTP response.
+    await this.kafka.emit(TOPIC_GRN_POSTED, {
+      key: tenantId,
+      value: {
+        occurredAt:  new Date().toISOString(),
+        tenantId,
+        triggeredBy: userId,
+        grnId,
+        grnNumber:   grn.grnNumber ?? grnId,
+        supplierId:  grn.supplierId,
+        location,
+        totalLines:  ledgerEntries.length,
+        lines: ledgerEntries.map((e: any, idx: number) => ({
+          itemId:   postableLines[idx]?.itemId ?? e.itemId,
+          qty:      Number(e.qty),
+          rate:     postableLines[idx]?.rate   ?? undefined,
+          ledgerId: e.id,
+        })),
+      },
     });
 
     return { grn: updatedGrn, ledgerEntries };
