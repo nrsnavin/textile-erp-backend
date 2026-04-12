@@ -639,3 +639,26 @@ model DelayRiskScore {
 
   @@map("delay_risk_scores")
 }
+
+// ── Client Mutation (offline sync idempotency) ────────────────────────────
+//
+// Stores the clientId of every mutation received from mobile clients.
+// Used for server-side deduplication: if a mutation with the same clientId
+// has already been processed, the server returns the cached result instead
+// of replaying the operation.  Rows are pruned after 30 days.
+
+model ClientMutation {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  userId       String   @map("user_id")
+  clientId     String   @map("client_id")        // UUID generated on client
+  endpoint     String                              // e.g. "/api/v1/buyers"
+  method       String                              // POST | PATCH | PUT | DELETE
+  statusCode   Int      @map("status_code")       // HTTP status returned
+  responseBody Json?    @map("response_body")      // cached response for idempotent replay
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@unique([tenantId, clientId])
+  @@index([tenantId, userId, processedAt])
+  @@map("client_mutations")
+}
