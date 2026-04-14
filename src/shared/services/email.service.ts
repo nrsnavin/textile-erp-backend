@@ -74,6 +74,15 @@ export class EmailService {
     });
   }
 
+  // ── Public generic send (used by email-queue processor) ────────────
+  async send(params: {
+    to:      string;
+    subject: string;
+    html:    string;
+  }): Promise<void> {
+    return this.sendMail(params);
+  }
+
   // ── Core send ─────────────────────────────────────────────────────────
   private async sendMail(params: {
     to:      string;
