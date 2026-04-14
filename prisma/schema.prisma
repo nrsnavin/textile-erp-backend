@@ -427,12 +427,9 @@ model Item {
   category   String? // FABRIC | TRIM | PACKING | FINISHED_GOODS
   properties Json?
 
-  boms         Bom[]          @relation("BomFinishedGood")
-  bomLines     BomLine[]      @relation("BomRawMaterial")
-  stockLedger  StockLedger[]
-  stockBalance StockBalance[]
-  bomParent  Bom[]         @relation("BomParent")
-  bomLines   BomLine[]
+  boms          Bom[]          @relation("BomParent")
+  bomLines      BomLine[]      @relation("BomChild")
+  stockLedger   StockLedger[]
   stockBalances StockBalance[]
 
   @@unique([tenantId, code])
@@ -450,6 +447,7 @@ model Bom {
   id            String    @id @default(uuid())
   tenantId      String    @map("tenant_id")
   parentItemId  String    @map("parent_item_id")   // the finished good
+  styleCode     String?   @map("style_code")       // optional style variant
   version       Int       @default(1)
   isActive      Boolean   @default(true)  @map("is_active")
   remarks       String?
@@ -477,7 +475,7 @@ model BomLine {
   remarks       String?
 
   bom           Bom     @relation(fields: [bomId], references: [id], onDelete: Cascade)
-  childItem     Item    @relation(fields: [childItemId], references: [id])
+  childItem     Item    @relation("BomChild", fields: [childItemId], references: [id])
 
   @@index([tenantId, bomId])
   @@map("bom_lines")
@@ -486,16 +484,19 @@ model BomLine {
 // ── Stock Balance ─────────────────────────────────────────────────────────
 
 model StockBalance {
-  id         String  @id @default(uuid())
-  tenantId   String  @map("tenant_id")
-  itemId     String  @map("item_id")
-  location   String  @default("MAIN")            // warehouse / location code
-  onHand     Float   @default(0)  @map("on_hand")
-  allocated  Float   @default(0)                 // reserved for production
-  onOrder    Float   @default(0)  @map("on_order") // qty on open POs
-  unit       String
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  itemId     String   @map("item_id")
+  location   String   @default("MAIN")              // warehouse / location code
+  onHand     Float    @default(0)  @map("on_hand")
+  allocated  Float    @default(0)                   // reserved for production (MRP/sync)
+  onOrder    Float    @default(0)  @map("on_order") // qty on open POs
+  reserved   Float    @default(0)                   // reserved qty (inventory)
+  available  Float    @default(0)                   // onHand - reserved
+  unit       String   @default("PCS")
+  updatedAt  DateTime @updatedAt   @map("updated_at")
 
-  item       Item    @relation(fields: [itemId], references: [id])
+  item       Item     @relation(fields: [itemId], references: [id])
 
   @@unique([tenantId, itemId, location])
   @@index([tenantId, itemId])
@@ -785,45 +786,6 @@ model OrderRevision {
 
 // ── Inventory domain ───────────────────────────────────────────────────────
 
-// Bill of Materials — recipe for each finished good / style variant
-model Bom {
-  id          String   @id @default(uuid())
-  tenantId    String   @map("tenant_id")
-  itemId      String   @map("item_id")      // finished good
-  styleCode   String?  @map("style_code")   // optional style variant
-  version     Int      @default(1)
-  isActive    Boolean  @default(true) @map("is_active")
-  remarks     String?
-  createdById String   @map("created_by_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt     @map("updated_at")
-
-  item        Item     @relation("BomFinishedGood", fields: [itemId], references: [id])
-  lines       BomLine[]
-
-  @@unique([tenantId, itemId, styleCode, version])
-  @@index([tenantId, itemId])
-  @@map("boms")
-}
-
-// BOM component lines — each raw material / trim needed
-model BomLine {
-  id          String  @id @default(uuid())
-  tenantId    String  @map("tenant_id")
-  bomId       String  @map("bom_id")
-  rawItemId   String  @map("raw_item_id")
-  qty         Decimal @db.Decimal(14,4)       // qty per unit of finished good
-  unit        String
-  wastagePct  Float   @default(0) @map("wastage_pct")
-  remarks     String?
-
-  bom         Bom     @relation(fields: [bomId],       references: [id], onDelete: Cascade)
-  rawItem     Item    @relation("BomRawMaterial", fields: [rawItemId], references: [id])
-
-  @@index([tenantId, bomId])
-  @@map("bom_lines")
-}
-
 // Stock Ledger — append-only log of every inventory movement
 enum LedgerEntryType {
   GRN_IN
@@ -854,24 +816,6 @@ model StockLedger {
 
   @@index([tenantId, itemId, location, createdAt])
   @@map("stock_ledger")
-}
-
-// Stock Balance — materialized current balance (updated on every ledger entry)
-model StockBalance {
-  id        String   @id @default(uuid())
-  tenantId  String   @map("tenant_id")
-  itemId    String   @map("item_id")
-  location  String   @default("MAIN")
-  onHand    Decimal  @db.Decimal(14,4) @map("on_hand")
-  reserved  Decimal  @db.Decimal(14,4) @default(0)
-  available Decimal  @db.Decimal(14,4)                // onHand - reserved
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  item      Item     @relation(fields: [itemId], references: [id])
-
-  @@unique([tenantId, itemId, location])
-  @@index([tenantId, itemId])
-  @@map("stock_balances")
 }
 
 model Shipment {
