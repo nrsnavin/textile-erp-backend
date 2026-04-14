@@ -2,6 +2,7 @@ import { NotFoundException, BadRequestException, ConflictException } from '@nest
 import { FinanceService }    from './finance.service';
 import { FinanceRepository } from './finance.repository';
 import { GstService }        from './gst/gst.service';
+import { EInvoiceService }   from './einvoice/einvoice.service';
 import { AuditService }      from '../../shared/services/audit.service';
 import { InvoiceType, InvoiceStatus, PaymentMode } from './dto/finance.dto';
 
@@ -26,22 +27,33 @@ const mockAudit = () => ({
   getHistory: jest.fn(),
 });
 
+const mockEInvoice = () => ({
+  authenticate:  jest.fn(),
+  generateIrn:   jest.fn(),
+  cancelIrn:     jest.fn(),
+  getIrnDetails: jest.fn(),
+  buildPayload:  jest.fn(),
+});
+
 describe('FinanceService', () => {
-  let service: FinanceService;
-  let repo:    ReturnType<typeof mockRepo>;
-  let gst:     GstService;
-  let audit:   ReturnType<typeof mockAudit>;
+  let service:   FinanceService;
+  let repo:      ReturnType<typeof mockRepo>;
+  let gst:       GstService;
+  let einvoice:  ReturnType<typeof mockEInvoice>;
+  let audit:     ReturnType<typeof mockAudit>;
 
   const tenantId = 'tenant-001';
   const userId   = 'user-001';
 
   beforeEach(() => {
-    repo  = mockRepo();
-    gst   = new GstService(); // real GST service — it's pure math
-    audit = mockAudit();
-    service = new FinanceService(
+    repo     = mockRepo();
+    gst      = new GstService(); // real GST service — it's pure math
+    einvoice = mockEInvoice();
+    audit    = mockAudit();
+    service  = new FinanceService(
       repo as any as FinanceRepository,
       gst,
+      einvoice as any as EInvoiceService,
       audit as any as AuditService,
     );
   });
@@ -343,6 +355,157 @@ describe('FinanceService', () => {
       expect(repo.getArApSummary).toHaveBeenCalledWith(tenantId, {
         type: InvoiceType.PURCHASE,
       });
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // E-INVOICE (NIC API)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  describe('generateEInvoice', () => {
+    const baseDto = {
+      invoiceId:       'inv-001',
+      sellerGstin:     '29AADCB2230M1ZP',
+      sellerLegalName: 'Textile Corp Pvt Ltd',
+      sellerAddress:   '123 Industrial Area',
+      sellerCity:      'Mumbai',
+      sellerPin:       400001,
+      sellerStateCode: '27',
+      buyerGstin:      '06BZAHM6385P6Z2',
+      buyerLegalName:  'Fashion House LLC',
+      buyerAddress:    '456 Market Street',
+      buyerCity:       'Delhi',
+      buyerPin:        110001,
+      buyerStateCode:  '07',
+    };
+
+    it('generates IRN and stores it on the invoice', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', status: 'SENT', invoiceNo: 'INV-001',
+        invoiceDate: new Date(), subtotal: 25000, gstAmount: 1250, total: 26250,
+        irnNumber: null,
+        lines: [{ description: 'Fabric', hsnCode: '5208', qty: 100, rate: 250, gstPct: 5, amount: 26250 }],
+      });
+      einvoice.buildPayload.mockReturnValue({ Version: '1.1' });
+      einvoice.generateIrn.mockResolvedValue({
+        Irn: 'a4b5c6d7e8f9', AckNo: 12345, AckDt: '2026-04-14',
+        SignedInvoice: 'signed-jwt', SignedQRCode: 'qr-data',
+      });
+      repo.updateInvoice.mockResolvedValue({});
+
+      const result = await service.generateEInvoice(baseDto as any, tenantId, userId);
+
+      expect(result.irn).toBe('a4b5c6d7e8f9');
+      expect(result.ackNo).toBe(12345);
+      expect(repo.updateInvoice).toHaveBeenCalledWith('inv-001', tenantId, { irnNumber: 'a4b5c6d7e8f9' });
+      expect(audit.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'GENERATE_EINVOICE' }),
+      );
+    });
+
+    it('auto-transitions DRAFT to SENT on IRN generation', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', status: 'DRAFT', invoiceNo: 'INV-001',
+        invoiceDate: new Date(), subtotal: 1000, gstAmount: 120, total: 1120,
+        irnNumber: null, lines: [],
+      });
+      einvoice.buildPayload.mockReturnValue({});
+      einvoice.generateIrn.mockResolvedValue({ Irn: 'irn-123', AckNo: 1, AckDt: '2026-04-14' });
+      repo.updateInvoice.mockResolvedValue({});
+
+      await service.generateEInvoice(baseDto as any, tenantId, userId);
+
+      // Should be called twice: once for irnNumber, once for status
+      expect(repo.updateInvoice).toHaveBeenCalledWith('inv-001', tenantId, { status: 'SENT' });
+    });
+
+    it('rejects if invoice already has IRN', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', status: 'SENT', irnNumber: 'existing-irn',
+      });
+
+      await expect(
+        service.generateEInvoice(baseDto as any, tenantId, userId),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('rejects if invoice is cancelled', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', status: 'CANCELLED', irnNumber: null,
+      });
+
+      await expect(
+        service.generateEInvoice(baseDto as any, tenantId, userId),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws 404 for missing invoice', async () => {
+      repo.findInvoiceById.mockResolvedValue(null);
+
+      await expect(
+        service.generateEInvoice(baseDto as any, tenantId, userId),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('cancelEInvoice', () => {
+    it('cancels IRN and clears it from invoice', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', irnNumber: 'irn-to-cancel',
+      });
+      einvoice.cancelIrn.mockResolvedValue({
+        Irn: 'irn-to-cancel', CancelDate: '2026-04-14',
+      });
+      repo.updateInvoice.mockResolvedValue({});
+
+      const result = await service.cancelEInvoice(
+        { invoiceId: 'inv-001', reason: '2' as any, remark: 'Data entry mistake' },
+        tenantId, userId,
+      );
+
+      expect(result.cancelDate).toBe('2026-04-14');
+      expect(repo.updateInvoice).toHaveBeenCalledWith('inv-001', tenantId, { irnNumber: null });
+    });
+
+    it('rejects if invoice has no IRN', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', irnNumber: null,
+      });
+
+      await expect(
+        service.cancelEInvoice(
+          { invoiceId: 'inv-001', reason: '2' as any, remark: 'Mistake' },
+          tenantId, userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('getEInvoiceDetails', () => {
+    it('returns IRN details for an invoice with IRN', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', irnNumber: 'irn-123',
+      });
+      einvoice.getIrnDetails.mockResolvedValue({
+        Irn: 'irn-123', AckNo: 99, AckDt: '2026-04-14',
+        SignedInvoice: 'jwt', SignedQRCode: 'qr',
+      });
+
+      const result = await service.getEInvoiceDetails('inv-001', tenantId);
+
+      expect(result.irn).toBe('irn-123');
+      expect(result.ackNo).toBe(99);
+    });
+
+    it('returns null IRN message for invoice without IRN', async () => {
+      repo.findInvoiceById.mockResolvedValue({
+        id: 'inv-001', irnNumber: null,
+      });
+
+      const result = await service.getEInvoiceDetails('inv-001', tenantId);
+
+      expect(result.irn).toBeNull();
+      expect(result.message).toContain('No IRN');
     });
   });
 });

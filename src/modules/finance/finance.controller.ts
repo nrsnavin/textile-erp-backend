@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { FinanceService }        from './finance.service';
+import { EInvoiceService }       from './einvoice/einvoice.service';
 import { ApiAuth }               from '../../shared/decorators/api-auth.decorator';
 import { CurrentTenant, CurrentUser } from '../../shared/decorators/current-user.decorator';
 import { Role }                  from '../../shared/guards/roles.guard';
@@ -13,12 +14,16 @@ import {
   CreatePaymentDto, PaymentFilterDto, ArApFilterDto,
   InvoiceType,
 } from './dto/finance.dto';
+import { GenerateIrnDto, CancelIrnDto } from './einvoice/einvoice.dto';
 
 @ApiTags('Finance')
 @ApiAuth()
 @Controller('api/v1/finance')
 export class FinanceController {
-  constructor(private readonly financeService: FinanceService) {}
+  constructor(
+    private readonly financeService: FinanceService,
+    private readonly einvoiceService: EInvoiceService,
+  ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
   // INVOICES — /api/v1/finance/invoices
@@ -171,5 +176,43 @@ export class FinanceController {
     @Body() body: { lines: Array<{ qty: number; rate: number; gstPct?: number; hsnCode?: string }>; isInterState?: boolean },
   ) {
     return this.financeService.previewGst(body.lines, body.isInterState ?? false);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // E-INVOICE (NIC API) — /api/v1/finance/einvoice
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Post('einvoice/generate')
+  @HttpCode(HttpStatus.OK)
+  @ApiAuth(Role.OWNER, Role.ACCOUNTANT)
+  @ApiOperation({ summary: 'Generate IRN via NIC e-Invoice API (sandbox)' })
+  async generateIrn(
+    @Body() dto: GenerateIrnDto,
+    @CurrentTenant() tenantId: string,
+    @CurrentUser()   userId: string,
+  ) {
+    return this.financeService.generateEInvoice(dto, tenantId, userId);
+  }
+
+  @Post('einvoice/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ApiAuth(Role.OWNER, Role.ACCOUNTANT)
+  @ApiOperation({ summary: 'Cancel IRN via NIC e-Invoice API (within 24h of generation)' })
+  async cancelIrn(
+    @Body() dto: CancelIrnDto,
+    @CurrentTenant() tenantId: string,
+    @CurrentUser()   userId: string,
+  ) {
+    return this.financeService.cancelEInvoice(dto, tenantId, userId);
+  }
+
+  @Get('einvoice/:id')
+  @ApiAuth(Role.OWNER, Role.ACCOUNTANT)
+  @ApiOperation({ summary: 'Get IRN details for an invoice' })
+  async getIrnDetails(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentTenant() tenantId: string,
+  ) {
+    return this.financeService.getEInvoiceDetails(id, tenantId);
   }
 }

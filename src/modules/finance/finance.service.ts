@@ -5,19 +5,22 @@ import {
 } from '@nestjs/common';
 import { FinanceRepository } from './finance.repository';
 import { GstService }       from './gst/gst.service';
+import { EInvoiceService }  from './einvoice/einvoice.service';
 import { AuditService }     from '../../shared/services/audit.service';
 import {
   CreateInvoiceDto, UpdateInvoiceDto, InvoiceFilterDto,
   CreatePaymentDto, PaymentFilterDto, ArApFilterDto,
   InvoiceStatus, InvoiceType,
 } from './dto/finance.dto';
+import { GenerateIrnDto, CancelIrnDto } from './einvoice/einvoice.dto';
 
 @Injectable()
 export class FinanceService {
   constructor(
-    private readonly repo:  FinanceRepository,
-    private readonly gst:   GstService,
-    private readonly audit: AuditService,
+    private readonly repo:      FinanceRepository,
+    private readonly gst:       GstService,
+    private readonly einvoice:  EInvoiceService,
+    private readonly audit:     AuditService,
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -297,5 +300,151 @@ export class FinanceService {
     isInterState: boolean,
   ) {
     return this.gst.computeInvoiceGst(lines, isInterState);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // E-INVOICE (NIC API)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async generateEInvoice(dto: GenerateIrnDto, tenantId: string, userId: string) {
+    const invoice = await this.repo.findInvoiceById(dto.invoiceId, tenantId);
+    if (!invoice) throw new NotFoundException(`Invoice ${dto.invoiceId} not found`);
+
+    if (invoice.irnNumber) {
+      throw new ConflictException(
+        `Invoice already has IRN: ${invoice.irnNumber}. Cancel the existing IRN first.`,
+      );
+    }
+
+    if (invoice.status === 'CANCELLED') {
+      throw new BadRequestException('Cannot generate IRN for a cancelled invoice');
+    }
+
+    const isInterState = dto.isInterState ?? (dto.sellerStateCode !== dto.buyerStateCode);
+
+    // Build NIC payload from invoice data
+    const payload = this.einvoice.buildPayload({
+      invoice: {
+        invoiceNo:   invoice.invoiceNo,
+        invoiceDate: invoice.invoiceDate,
+        subtotal:    Number(invoice.subtotal),
+        gstAmount:   Number(invoice.gstAmount),
+        total:       Number(invoice.total),
+        lines: (invoice.lines ?? []).map((l: any) => ({
+          description: l.description,
+          hsnCode:     l.hsnCode,
+          qty:         l.qty,
+          rate:        Number(l.rate),
+          gstPct:      l.gstPct,
+          amount:      Number(l.amount),
+        })),
+      },
+      seller: {
+        Gstin: dto.sellerGstin,
+        LglNm: dto.sellerLegalName,
+        TrdNm: dto.sellerTradeName,
+        Addr1: dto.sellerAddress,
+        Loc:   dto.sellerCity,
+        Pin:   dto.sellerPin,
+        Stcd:  dto.sellerStateCode,
+      },
+      buyer: {
+        Gstin: dto.buyerGstin,
+        LglNm: dto.buyerLegalName,
+        TrdNm: dto.buyerTradeName,
+        Pos:   dto.placeOfSupply ?? dto.buyerStateCode,
+        Addr1: dto.buyerAddress,
+        Loc:   dto.buyerCity,
+        Pin:   dto.buyerPin,
+        Stcd:  dto.buyerStateCode,
+      },
+      isInterState,
+      supplyType: dto.supplyType,
+    });
+
+    // Submit to NIC
+    const result = await this.einvoice.generateIrn(payload);
+
+    // Store IRN on invoice
+    await this.repo.updateInvoice(dto.invoiceId, tenantId, {
+      irnNumber: result.Irn,
+    });
+
+    // If invoice is still DRAFT, move to SENT
+    if (invoice.status === 'DRAFT') {
+      await this.repo.updateInvoice(dto.invoiceId, tenantId, { status: 'SENT' });
+    }
+
+    await this.audit.log({
+      tenantId, userId,
+      action: 'GENERATE_EINVOICE', tableName: 'invoices', recordId: dto.invoiceId,
+      newValues: {
+        irn:   result.Irn,
+        ackNo: result.AckNo,
+        ackDt: result.AckDt,
+      },
+    });
+
+    return {
+      invoiceId:     dto.invoiceId,
+      irn:           result.Irn,
+      ackNo:         result.AckNo,
+      ackDt:         result.AckDt,
+      signedInvoice: result.SignedInvoice,
+      signedQRCode:  result.SignedQRCode,
+    };
+  }
+
+  async cancelEInvoice(dto: CancelIrnDto, tenantId: string, userId: string) {
+    const invoice = await this.repo.findInvoiceById(dto.invoiceId, tenantId);
+    if (!invoice) throw new NotFoundException(`Invoice ${dto.invoiceId} not found`);
+
+    if (!invoice.irnNumber) {
+      throw new BadRequestException('Invoice does not have an IRN to cancel');
+    }
+
+    const result = await this.einvoice.cancelIrn(
+      invoice.irnNumber,
+      dto.reason as '1' | '2' | '3' | '4',
+      dto.remark,
+    );
+
+    // Clear IRN from invoice
+    await this.repo.updateInvoice(dto.invoiceId, tenantId, {
+      irnNumber: null,
+    });
+
+    await this.audit.log({
+      tenantId, userId,
+      action: 'UPDATE', tableName: 'invoices', recordId: dto.invoiceId,
+      oldValues: { irnNumber: invoice.irnNumber },
+      newValues: { irnNumber: null, cancelDate: result.CancelDate },
+    });
+
+    return {
+      invoiceId:  dto.invoiceId,
+      irn:        result.Irn,
+      cancelDate: result.CancelDate,
+    };
+  }
+
+  async getEInvoiceDetails(invoiceId: string, tenantId: string) {
+    const invoice = await this.repo.findInvoiceById(invoiceId, tenantId);
+    if (!invoice) throw new NotFoundException(`Invoice ${invoiceId} not found`);
+
+    if (!invoice.irnNumber) {
+      return { invoiceId, irn: null, message: 'No IRN generated for this invoice' };
+    }
+
+    const details = await this.einvoice.getIrnDetails(invoice.irnNumber);
+
+    return {
+      invoiceId,
+      irn:           details.Irn,
+      ackNo:         details.AckNo,
+      ackDt:         details.AckDt,
+      signedInvoice: details.SignedInvoice,
+      signedQRCode:  details.SignedQRCode,
+    };
   }
 }

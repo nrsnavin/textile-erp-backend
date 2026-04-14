@@ -5,11 +5,12 @@ import { FinanceController }   from './finance.controller';
 import { FinanceService }      from './finance.service';
 import { FinanceRepository }   from './finance.repository';
 import { GstService }          from './gst/gst.service';
+import { EInvoiceService }     from './einvoice/einvoice.service';
 
 @Module({
   imports:     [SharedModule],
   controllers: [FinanceController],
-  providers:   [FinanceService, FinanceRepository, GstService],
-  exports:     [FinanceService, GstService],
+  providers:   [FinanceService, FinanceRepository, GstService, EInvoiceService],
+  exports:     [FinanceService, GstService, EInvoiceService],
 })
 export class FinanceModule {}
