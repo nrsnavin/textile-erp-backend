@@ -5,6 +5,8 @@ import { AuthModule }         from './modules/auth/auth.module';
 import { BuyersModule }       from './modules/buyer/buyer.module';
 import { SuppliersModule }    from './modules/suppliers/suppliers.module';
 import { SyncModule }         from './modules/sync/sync.module';
+import { FinanceModule }      from './modules/finance/finance.module';
+import { MrpModule }          from './modules/mrp/mrp.module';
 import { HealthController }   from './shared/health.controller';
 
 @Module({
@@ -15,6 +17,8 @@ import { HealthController }   from './shared/health.controller';
     BuyersModule,
     SuppliersModule,
     SyncModule,
+    FinanceModule,
+    MrpModule,
   ],
   controllers: [HealthController],
 })

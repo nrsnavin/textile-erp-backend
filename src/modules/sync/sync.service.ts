@@ -256,8 +256,64 @@ export class SyncService {
   ) {
     // Inventory mutations are stock adjustments
     if (route.action === 'adjust' || route.id === 'stock') {
-      // Stock adjustment: create a ledger entry and update balance
-      return { acknowledged: true, action: 'stock_adjustment' };
+      const { itemId, location, qty, adjustmentType, unit, reason } = body;
+
+      if (!itemId || qty == null || !adjustmentType) {
+        throw new Error('Stock adjustment requires itemId, qty, and adjustmentType');
+      }
+
+      const loc = location ?? 'MAIN';
+
+      // Determine field and delta based on adjustment type
+      let updateData: Record<string, any> = {};
+      switch (adjustmentType) {
+        case 'RECEIPT':       updateData = { onHand: { increment: qty } }; break;
+        case 'ISSUE':         updateData = { onHand: { decrement: qty } }; break;
+        case 'ALLOCATE':      updateData = { allocated: { increment: qty } }; break;
+        case 'DEALLOCATE':    updateData = { allocated: { decrement: qty } }; break;
+        case 'PO_PLACED':     updateData = { onOrder: { increment: qty } }; break;
+        case 'PO_RECEIVED':   updateData = { onOrder: { decrement: qty }, onHand: { increment: qty } }; break;
+        default:
+          throw new Error(`Unknown adjustmentType: ${adjustmentType}. Expected RECEIPT|ISSUE|ALLOCATE|DEALLOCATE|PO_PLACED|PO_RECEIVED`);
+      }
+
+      // Upsert: create the stock balance row if it doesn't exist, then apply delta
+      const existing = await tx.stockBalance.findUnique({
+        where: { tenantId_itemId_location: { tenantId, itemId, location: loc } },
+      });
+
+      if (!existing) {
+        // First-time entry: set initial values directly
+        const initial: Record<string, number> = { onHand: 0, allocated: 0, onOrder: 0 };
+        if (adjustmentType === 'RECEIPT' || adjustmentType === 'PO_RECEIVED') initial.onHand = qty;
+        if (adjustmentType === 'ALLOCATE')    initial.allocated = qty;
+        if (adjustmentType === 'PO_PLACED')   initial.onOrder = qty;
+
+        await tx.stockBalance.create({
+          data: {
+            tenantId,
+            itemId,
+            location: loc,
+            unit: unit ?? 'PCS',
+            ...initial,
+          },
+        });
+      } else {
+        // Validate: prevent negative stock
+        if (adjustmentType === 'ISSUE' && existing.onHand < qty) {
+          throw new Error(`Insufficient on-hand stock. Available: ${existing.onHand}, requested: ${qty}`);
+        }
+        if (adjustmentType === 'DEALLOCATE' && existing.allocated < qty) {
+          throw new Error(`Cannot deallocate more than allocated. Allocated: ${existing.allocated}, requested: ${qty}`);
+        }
+
+        await tx.stockBalance.update({
+          where: { tenantId_itemId_location: { tenantId, itemId, location: loc } },
+          data: updateData,
+        });
+      }
+
+      return { acknowledged: true, action: 'stock_adjustment', adjustmentType, itemId, qty, location: loc };
     }
     throw new Error(`Unsupported inventory mutation: ${route.action}`);
   }
