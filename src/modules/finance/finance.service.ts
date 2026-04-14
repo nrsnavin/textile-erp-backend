@@ -47,6 +47,18 @@ export class FinanceService {
       throw new BadRequestException('SALES invoices require a buyerId');
     }
 
+    // ── Business rule: Credit limit enforcement ───────────────────────────
+    // Before creating a SALES invoice, verify the buyer's outstanding balance
+    // plus this invoice would not exceed their credit limit.
+    if (dto.type === InvoiceType.SALES && dto.buyerId) {
+      await this.enforceCreditLimit(dto.buyerId, tenantId, dto.lines);
+    }
+
+    // ── Business rule: Due date must be in the future ─────────────────────
+    if (new Date(dto.dueDate) <= new Date(dto.invoiceDate)) {
+      throw new BadRequestException('Due date must be after invoice date');
+    }
+
     // Compute GST across all lines
     const isInterState = dto.isInterState ?? false;
     const gstSummary = this.gst.computeInvoiceGst(
@@ -179,6 +191,43 @@ export class FinanceService {
     const invoice = await this.repo.findInvoiceById(id, tenantId);
     if (!invoice) throw new NotFoundException(`Invoice ${id} not found`);
     return this.audit.getHistory(tenantId, 'invoices', id);
+  }
+
+  // ── Business rules ───────────────────────────────────────────────────────
+
+  /**
+   * Enforce buyer credit limit before creating a SALES invoice.
+   * Outstanding = sum(total - paidAmount) of non-cancelled invoices for this buyer.
+   * If outstanding + new invoice total > creditLimit → reject.
+   */
+  private async enforceCreditLimit(
+    buyerId: string,
+    tenantId: string,
+    lines: Array<{ qty: number; rate: number; gstPct?: number; hsnCode?: string }>,
+  ) {
+    // Estimate new invoice total (rough — before full GST calc)
+    const estimatedSubtotal = lines.reduce((sum, l) => sum + l.qty * l.rate, 0);
+    const avgGstRate = 12; // conservative estimate
+    const estimatedTotal = estimatedSubtotal * (1 + avgGstRate / 100);
+
+    // Fetch buyer credit limit
+    const buyer = await this.repo.findBuyerCreditInfo(buyerId, tenantId);
+    if (!buyer || !buyer.creditLimit) return; // no limit set → skip
+
+    const creditLimit = Number(buyer.creditLimit);
+    if (creditLimit <= 0) return;
+
+    // Fetch current outstanding
+    const outstanding = await this.repo.getBuyerOutstanding(buyerId, tenantId);
+
+    if (outstanding + estimatedTotal > creditLimit) {
+      throw new BadRequestException(
+        `Invoice would exceed buyer credit limit. ` +
+        `Limit: ${creditLimit}, outstanding: ${outstanding.toFixed(2)}, ` +
+        `new invoice: ~${estimatedTotal.toFixed(2)}, ` +
+        `available: ${(creditLimit - outstanding).toFixed(2)}`,
+      );
+    }
   }
 
   // ── Status machine ──────────────────────────────────────────────────────

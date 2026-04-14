@@ -20,6 +20,8 @@ const mockRepo = () => ({
   getInvoicePaymentTotal:  jest.fn(),
   getArApSummary:          jest.fn(),
   getAgingBuckets:         jest.fn(),
+  findBuyerCreditInfo:     jest.fn(),
+  getBuyerOutstanding:     jest.fn(),
 });
 
 const mockAudit = () => ({

@@ -269,4 +269,30 @@ export class FinanceRepository {
       days60plus: { count: bucket90plus._count.id,   outstanding: outstanding(bucket90plus) },
     };
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUYER CREDIT
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async findBuyerCreditInfo(buyerId: string, tenantId: string) {
+    return this.prisma.buyer.findFirst({
+      where: { id: buyerId, tenantId },
+      select: { id: true, name: true, creditLimit: true, creditDays: true },
+    });
+  }
+
+  async getBuyerOutstanding(buyerId: string, tenantId: string): Promise<number> {
+    const result = await this.prisma.invoice.aggregate({
+      where: {
+        tenantId,
+        buyerId,
+        type: 'SALES',
+        status: { notIn: ['CANCELLED', 'PAID'] },
+      },
+      _sum: { total: true, paidAmount: true },
+    });
+    const total = Number(result._sum.total ?? 0);
+    const paid  = Number(result._sum.paidAmount ?? 0);
+    return Math.round((total - paid) * 100) / 100;
+  }
 }
