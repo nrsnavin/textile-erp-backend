@@ -381,6 +381,7 @@ model Grn {
   status      String    @default("DRAFT")
                         // DRAFT | POSTED | CANCELLED
   grnDate     DateTime  @map("grn_date")
+  location    String    @default("MAIN")
   invoiceNo   String?   @map("invoice_no")
   remarks     String?
   createdById String    @map("created_by_id")
@@ -403,6 +404,7 @@ model GrnLine {
   itemId      String  @map("item_id")
   description String?
   qty         Float
+  acceptedQty Float?  @map("accepted_qty")
   unit        String
   rate        Float
   hsnCode     String? @map("hsn_code")
@@ -425,6 +427,10 @@ model Item {
   category   String? // FABRIC | TRIM | PACKING | FINISHED_GOODS
   properties Json?
 
+  boms         Bom[]          @relation("BomFinishedGood")
+  bomLines     BomLine[]      @relation("BomRawMaterial")
+  stockLedger  StockLedger[]
+  stockBalance StockBalance[]
   bomParent  Bom[]         @relation("BomParent")
   bomLines   BomLine[]
   stockBalances StockBalance[]
@@ -606,6 +612,11 @@ model Order {
   deliveryDate DateTime    @map("delivery_date")
   season       String?
   remarks      String?
+  // JSONB snapshot of lines (updated on every save, frozen on CONFIRM)
+  linesJson    Json?       @map("lines_json")
+  // Denormalized totals for fast list views
+  totalQty     Int         @default(0) @map("total_qty")
+  totalStyles  Int         @default(0) @map("total_styles")
   confirmedAt  DateTime?   @map("confirmed_at")
   paidAt       DateTime?   @map("paid_at")
   createdById  String      @map("created_by_id")
@@ -620,21 +631,26 @@ model Order {
   qcInspections QcInspection[]
   delayRisk     DelayRiskScore?
 
+  @@unique([tenantId, poNumber])
   @@index([tenantId, status, deliveryDate])
   @@index([tenantId, buyerId])
   @@map("orders")
 }
 
 model OrderLine {
-  id        String @id @default(uuid())
-  tenantId  String @map("tenant_id")
-  orderId   String @map("order_id")
-  itemId    String @map("item_id")
-  styleCode String @map("style_code")
-  qty       Int
-  sizesJson Json   @map("sizes_json")
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  orderId     String   @map("order_id")
+  itemId      String   @map("item_id")
+  styleCode   String   @map("style_code")
+  colour      String?
+  qty         Int
+  // { "S": 100, "M": 200, "L": 150, "XL": 50 }
+  sizesJson   Json     @map("sizes_json")
+  unitPrice   Decimal? @db.Decimal(14,2) @map("unit_price")
+  currency    String   @default("USD")
 
-  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, orderId])
   @@map("order_lines")
@@ -645,13 +661,110 @@ model OrderRevision {
   tenantId      String   @map("tenant_id")
   orderId       String   @map("order_id")
   revisionNo    Int      @map("revision_no")
+  // diff: { "deliveryDate": { "from": "...", "to": "..." }, ... }
   changedFields Json     @map("changed_fields")
+  // full lines snapshot at time of this revision
+  linesSnapshot Json?    @map("lines_snapshot")
+  reason        String?
   revisedById   String   @map("revised_by_id")
   createdAt     DateTime @default(now()) @map("created_at")
 
   order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  @@unique([orderId, revisionNo])
+  @@index([tenantId, orderId])
   @@map("order_revisions")
+}
+
+// ── Inventory domain ───────────────────────────────────────────────────────
+
+// Bill of Materials — recipe for each finished good / style variant
+model Bom {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  itemId      String   @map("item_id")      // finished good
+  styleCode   String?  @map("style_code")   // optional style variant
+  version     Int      @default(1)
+  isActive    Boolean  @default(true) @map("is_active")
+  remarks     String?
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt     @map("updated_at")
+
+  item        Item     @relation("BomFinishedGood", fields: [itemId], references: [id])
+  lines       BomLine[]
+
+  @@unique([tenantId, itemId, styleCode, version])
+  @@index([tenantId, itemId])
+  @@map("boms")
+}
+
+// BOM component lines — each raw material / trim needed
+model BomLine {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  bomId       String  @map("bom_id")
+  rawItemId   String  @map("raw_item_id")
+  qty         Decimal @db.Decimal(14,4)       // qty per unit of finished good
+  unit        String
+  wastagePct  Float   @default(0) @map("wastage_pct")
+  remarks     String?
+
+  bom         Bom     @relation(fields: [bomId],       references: [id], onDelete: Cascade)
+  rawItem     Item    @relation("BomRawMaterial", fields: [rawItemId], references: [id])
+
+  @@index([tenantId, bomId])
+  @@map("bom_lines")
+}
+
+// Stock Ledger — append-only log of every inventory movement
+enum LedgerEntryType {
+  GRN_IN
+  ISSUE_TO_PROD
+  RETURN_FROM_PROD
+  ADJUSTMENT
+  TRANSFER_IN
+  TRANSFER_OUT
+  OPENING_STOCK
+}
+
+model StockLedger {
+  id          String          @id @default(uuid())
+  tenantId    String          @map("tenant_id")
+  itemId      String          @map("item_id")
+  location    String          @default("MAIN")
+  entryType   LedgerEntryType @map("entry_type")
+  qty         Decimal         @db.Decimal(14,4)              // positive=in, negative=out
+  balanceQty  Decimal         @db.Decimal(14,4) @map("balance_qty")
+  rate        Decimal?        @db.Decimal(14,2)
+  refType     String?         @map("ref_type")               // GRN | ORDER | ADJUSTMENT
+  refId       String?         @map("ref_id")
+  remarks     String?
+  createdById String          @map("created_by_id")
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  item        Item            @relation(fields: [itemId], references: [id])
+
+  @@index([tenantId, itemId, location, createdAt])
+  @@map("stock_ledger")
+}
+
+// Stock Balance — materialized current balance (updated on every ledger entry)
+model StockBalance {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  itemId    String   @map("item_id")
+  location  String   @default("MAIN")
+  onHand    Decimal  @db.Decimal(14,4) @map("on_hand")
+  reserved  Decimal  @db.Decimal(14,4) @default(0)
+  available Decimal  @db.Decimal(14,4)                // onHand - reserved
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  item      Item     @relation(fields: [itemId], references: [id])
+
+  @@unique([tenantId, itemId, location])
+  @@index([tenantId, itemId])
+  @@map("stock_balances")
 }
 
 model Shipment {
