@@ -21,7 +21,7 @@ export class BuyersService {
   }
 
   async createBuyer(dto: CreateBuyerDto, tenantId: string, userId: string) {
-    const buyer = await this.repo.create(dto, tenantId);
+    const buyer = await this.repo.create(dto, tenantId) as any;
     await this.audit.log({
       tenantId, userId,
       action: 'CREATE', tableName: 'buyers', recordId: buyer.id,

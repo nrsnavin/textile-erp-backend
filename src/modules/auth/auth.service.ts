@@ -89,17 +89,6 @@ export class AuthService {
       data:  { failedLoginCount: 0, lockedUntil: null },
     });
 
-    // MFA enabled → issue temp token and send OTP; do NOT issue access tokens yet
-    if (user.isMfaEnabled) {
-      const tempToken = await this.issueTempToken(user);
-      await this.generateAndSendOtp(user.id, user.tenantId, user.email, user.name, 'MFA_LOGIN');
-      return {
-        requiresMfa: true,
-        tempToken,
-        message: `A 6-digit code has been sent to ${this.maskEmail(user.email)}`,
-      };
-    }
-
     return this.tokenProvider.issueTokens(user, ip);
   }
 
@@ -225,7 +214,7 @@ export class AuthService {
           passwordHash,
           roles:        roleNames,    // denormalised cache
           isActive:     true,
-          isMfaEnabled: true,         // MFA on by default
+          isMfaEnabled: false,        // MFA disabled
         },
       });
 

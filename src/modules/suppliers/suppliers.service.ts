@@ -29,7 +29,7 @@ export class SuppliersService {
   }
 
   async createSupplier(dto: CreateSupplierDto, tenantId: string, userId: string) {
-    const supplier = await this.repo.createSupplier(dto, tenantId);
+    const supplier = await this.repo.createSupplier(dto, tenantId) as any;
     await this.audit.log({
       tenantId, userId,
       action: 'CREATE', tableName: 'suppliers', recordId: supplier.id,

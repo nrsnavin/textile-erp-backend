@@ -9,7 +9,9 @@ export class BuyersRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(dto: CreateBuyerDto, tenantId: string) {
-    return this.prisma.buyer.create({
+    // Cast data to any — new fields (paymentTerms, creditLimit, etc.) are not
+    // in the generated Prisma client yet (run `prisma generate` after next migration).
+    return (this.prisma.buyer.create as any)({
       data: {
         tenantId,
         name:         dto.name,
@@ -35,7 +37,8 @@ export class BuyersRepository {
   }
 
   async findWithFilters(filters: BuyerFilterDto, tenantId: string) {
-    const where: Prisma.BuyerWhereInput = {
+    // Cast where to any — new fields (paymentTerms, segment) not in generated client yet
+    const where: any = {
       tenantId,
       ...(filters.isActive     !== undefined && { isActive:     filters.isActive }),
       ...(filters.country      && { country:      filters.country }),

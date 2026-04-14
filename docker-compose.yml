@@ -1,4 +1,6 @@
 services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16
     environment:
@@ -10,60 +12,117 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d textile_erp"]
       interval: 10s
-      retries: 5
+      timeout:  5s
+      retries:  5
+      start_period: 10s
+    restart: unless-stopped
 
+  # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --requirepass redispassword
+    command: redis-server --requirepass redispassword --loglevel warning
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redispassword", "ping"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 5s
+    restart: unless-stopped
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    ports:
-      - "2181:2181"
-
+  # ── Kafka (KRaft mode — no ZooKeeper required) ────────────────────────────
+  #
+  # KRaft (Kafka Raft Metadata mode) replaces ZooKeeper with a built-in
+  # consensus protocol.  Available since Kafka 3.3 (cp-kafka 7.3+).
+  #
+  # CLUSTER_ID must be a fixed base64-encoded UUID so the storage is
+  # formatted consistently across restarts.  Generate once with:
+  #   docker run --rm confluentinc/cp-kafka:7.7.1 kafka-storage random-uuid
+  # and commit the result here (it is not a secret).
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    depends_on: [zookeeper]
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: kafka
     ports:
-      - "9092:9092"
+      - "9092:9092"    # external (host) access
+      - "9101:9101"    # JMX metrics
+    environment:
+      # ── KRaft identity ───────────────────────────────────────────────────
+      KAFKA_NODE_ID:               1
+      KAFKA_PROCESS_ROLES:         broker,controller
+      CLUSTER_ID:                  MkU3OEVBNTcwNTJENDM2Qk   # fixed base64 UUID
 
+      # ── Listeners ────────────────────────────────────────────────────────
+      # INTERNAL   — broker-to-broker inside the Docker network
+      # CONTROLLER — KRaft controller quorum (internal only)
+      # HOST       — external access from the Docker host (localhost:9092)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:  INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_LISTENERS:                       INTERNAL://kafka:29092,CONTROLLER://kafka:29093,HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS:            INTERNAL://kafka:29092,HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME:      INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES:       CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS:        1@kafka:29093
+
+      # ── Single-node tuning (dev only) ────────────────────────────────────
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:         1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR:            1
+      KAFKA_DEFAULT_REPLICATION_FACTOR:               1
+      KAFKA_MIN_INSYNC_REPLICAS:                      1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS:         0
+
+      # ── Topics & retention ───────────────────────────────────────────────
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS:       168
+
+      # ── JMX (optional metrics) ───────────────────────────────────────────
+      KAFKA_JMX_PORT:     9101
+      KAFKA_JMX_HOSTNAME: localhost
+
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      # kafka-broker-api-versions ships inside the Confluent image and
+      # succeeds only when the broker is fully up and accepting connections.
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout:  10s
+      retries:  6
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Adminer (DB UI) ────────────────────────────────────────────────────────
   adminer:
     image: adminer
     ports:
       - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
-  # ── NestJS API ──────────────────────────────────────────────────────────
+  # ── NestJS API ─────────────────────────────────────────────────────────────
   api:
     build:
-      context: .
+      context:    .
       dockerfile: Dockerfile
-      target: development
+      target:     development
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     environment:
-      NODE_ENV:      development
-      PORT:          3008
-      DATABASE_URL:  postgresql://postgres:postgres@postgres:5432/textile_erp
-      REDIS_URL:     redis://:redispassword@redis:6379
-      KAFKA_BROKERS: kafka:29092
-      JWT_SECRET:    dev-secret-change-in-production
+      NODE_ENV:       development
+      PORT:           3008
+      DATABASE_URL:   postgresql://postgres:postgres@postgres:5432/textile_erp
+      REDIS_URL:      redis://:redispassword@redis:6379
+      KAFKA_BROKERS:  kafka:29092
+      JWT_SECRET:     dev-secret-change-in-production
       ML_SERVICE_URL: http://ml:8000
     ports:
       - "3008:3008"
@@ -71,13 +130,14 @@ services:
       - .:/app
       - /app/node_modules
     command: npm run dev
+    restart: unless-stopped
 
-  # ── Next.js Web ─────────────────────────────────────────────────────────
+  # ── Next.js Web ────────────────────────────────────────────────────────────
   web:
     build:
-      context: ../textile-erp-web
+      context:    ../textile-erp-web
       dockerfile: Dockerfile
-      target: development
+      target:     development
     depends_on:
       - api
     environment:
@@ -93,6 +153,8 @@ services:
       - /app/node_modules
       - /app/.next
     command: npm run dev
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  kafka_data:

@@ -381,6 +381,7 @@ model Grn {
   status      String    @default("DRAFT")
                         // DRAFT | POSTED | CANCELLED
   grnDate     DateTime  @map("grn_date")
+  location    String    @default("MAIN")
   invoiceNo   String?   @map("invoice_no")
   remarks     String?
   createdById String    @map("created_by_id")
@@ -403,6 +404,7 @@ model GrnLine {
   itemId      String  @map("item_id")
   description String?
   qty         Float
+  acceptedQty Float?  @map("accepted_qty")
   unit        String
   rate        Float
   hsnCode     String? @map("hsn_code")
@@ -425,9 +427,168 @@ model Item {
   category   String? // FABRIC | TRIM | PACKING | FINISHED_GOODS
   properties Json?
 
+  boms         Bom[]          @relation("BomFinishedGood")
+  bomLines     BomLine[]      @relation("BomRawMaterial")
+  stockLedger  StockLedger[]
+  stockBalance StockBalance[]
+  bomParent  Bom[]         @relation("BomParent")
+  bomLines   BomLine[]
+  stockBalances StockBalance[]
+
   @@unique([tenantId, code])
   @@index([tenantId])
   @@map("items")
+}
+
+// ── BOM (Bill of Materials) ───────────────────────────────────────────────
+//
+// Each finished-good Item has one active BOM that lists the raw materials
+// and trims needed to produce one unit.  The MRP engine explodes these
+// recursively (multi-level BOMs are supported via parentItemId chains).
+
+model Bom {
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  parentItemId  String    @map("parent_item_id")   // the finished good
+  version       Int       @default(1)
+  isActive      Boolean   @default(true)  @map("is_active")
+  remarks       String?
+  createdById   String    @map("created_by_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt      @map("updated_at")
+
+  parentItem    Item      @relation("BomParent", fields: [parentItemId], references: [id])
+  lines         BomLine[]
+
+  @@unique([tenantId, parentItemId, version])
+  @@index([tenantId, parentItemId])
+  @@map("boms")
+}
+
+model BomLine {
+  id            String  @id @default(uuid())
+  tenantId      String  @map("tenant_id")
+  bomId         String  @map("bom_id")
+  childItemId   String  @map("child_item_id")    // raw material / component
+  qtyPer        Float   @map("qty_per")          // quantity per 1 unit of parent
+  unit          String                            // MTR, KGS, NOS, etc.
+  wastePct      Float   @default(0)  @map("waste_pct")  // e.g. 3.0 = 3% wastage allowance
+  leadTimeDays  Int     @default(7)  @map("lead_time_days")
+  remarks       String?
+
+  bom           Bom     @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  childItem     Item    @relation(fields: [childItemId], references: [id])
+
+  @@index([tenantId, bomId])
+  @@map("bom_lines")
+}
+
+// ── Stock Balance ─────────────────────────────────────────────────────────
+
+model StockBalance {
+  id         String  @id @default(uuid())
+  tenantId   String  @map("tenant_id")
+  itemId     String  @map("item_id")
+  location   String  @default("MAIN")            // warehouse / location code
+  onHand     Float   @default(0)  @map("on_hand")
+  allocated  Float   @default(0)                 // reserved for production
+  onOrder    Float   @default(0)  @map("on_order") // qty on open POs
+  unit       String
+
+  item       Item    @relation(fields: [itemId], references: [id])
+
+  @@unique([tenantId, itemId, location])
+  @@index([tenantId, itemId])
+  @@map("stock_balances")
+}
+
+// ── MRP Run ───────────────────────────────────────────────────────────────
+//
+// Snapshot of a Material Requirements Planning calculation.
+// Each run processes a set of orders and produces requirement lines + PRs.
+
+enum MrpRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model MrpRun {
+  id              String       @id @default(uuid())
+  tenantId        String       @map("tenant_id")
+  status          MrpRunStatus @default(RUNNING)
+  orderCount      Int          @default(0) @map("order_count")
+  lineCount       Int          @default(0) @map("line_count")
+  requisitionCount Int         @default(0) @map("requisition_count")
+  durationMs      Int?         @map("duration_ms")
+  error           String?
+  createdById     String       @map("created_by_id")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  completedAt     DateTime?    @map("completed_at")
+
+  lines           MrpLine[]
+  requisitions    PurchaseRequisition[]
+
+  @@index([tenantId, createdAt])
+  @@map("mrp_runs")
+}
+
+model MrpLine {
+  id               String   @id @default(uuid())
+  tenantId         String   @map("tenant_id")
+  mrpRunId         String   @map("mrp_run_id")
+  itemId           String   @map("item_id")
+  itemCode         String   @map("item_code")
+  itemName         String   @map("item_name")
+  unit             String
+  grossRequirement Float    @map("gross_requirement")  // total needed (BOM explosion)
+  onHand           Float    @map("on_hand")            // available stock
+  onOrder          Float    @map("on_order")           // qty on open POs
+  allocated        Float    @default(0)                // already reserved
+  netRequirement   Float    @map("net_requirement")    // shortage = max(0, gross - onHand - onOrder + allocated)
+  requiredByDate   DateTime @map("required_by_date")
+  orderByDate      DateTime @map("order_by_date")      // requiredBy - leadTimeDays
+
+  mrpRun           MrpRun   @relation(fields: [mrpRunId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, mrpRunId])
+  @@map("mrp_lines")
+}
+
+// ── Purchase Requisition ──────────────────────────────────────────────────
+//
+// Auto-generated from MRP net requirements.  Each PR can be converted to
+// a PurchaseOrder once approved.
+
+enum PrStatus {
+  OPEN
+  APPROVED
+  CONVERTED   // → PO created
+  CANCELLED
+}
+
+model PurchaseRequisition {
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  mrpRunId      String    @map("mrp_run_id")
+  prNumber      String    @map("pr_number")
+  itemId        String    @map("item_id")
+  itemCode      String    @map("item_code")
+  itemName      String    @map("item_name")
+  qty           Float
+  unit          String
+  requiredByDate DateTime @map("required_by_date")
+  orderByDate   DateTime  @map("order_by_date")
+  status        PrStatus  @default(OPEN)
+  poId          String?   @map("po_id")         // linked PO after conversion
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt      @map("updated_at")
+
+  mrpRun        MrpRun    @relation(fields: [mrpRunId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([tenantId, mrpRunId])
+  @@map("purchase_requisitions")
 }
 
 
@@ -451,6 +612,11 @@ model Order {
   deliveryDate DateTime    @map("delivery_date")
   season       String?
   remarks      String?
+  // JSONB snapshot of lines (updated on every save, frozen on CONFIRM)
+  linesJson    Json?       @map("lines_json")
+  // Denormalized totals for fast list views
+  totalQty     Int         @default(0) @map("total_qty")
+  totalStyles  Int         @default(0) @map("total_styles")
   confirmedAt  DateTime?   @map("confirmed_at")
   paidAt       DateTime?   @map("paid_at")
   createdById  String      @map("created_by_id")
@@ -465,21 +631,26 @@ model Order {
   qcInspections QcInspection[]
   delayRisk     DelayRiskScore?
 
+  @@unique([tenantId, poNumber])
   @@index([tenantId, status, deliveryDate])
   @@index([tenantId, buyerId])
   @@map("orders")
 }
 
 model OrderLine {
-  id        String @id @default(uuid())
-  tenantId  String @map("tenant_id")
-  orderId   String @map("order_id")
-  itemId    String @map("item_id")
-  styleCode String @map("style_code")
-  qty       Int
-  sizesJson Json   @map("sizes_json")
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  orderId     String   @map("order_id")
+  itemId      String   @map("item_id")
+  styleCode   String   @map("style_code")
+  colour      String?
+  qty         Int
+  // { "S": 100, "M": 200, "L": 150, "XL": 50 }
+  sizesJson   Json     @map("sizes_json")
+  unitPrice   Decimal? @db.Decimal(14,2) @map("unit_price")
+  currency    String   @default("USD")
 
-  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, orderId])
   @@map("order_lines")
@@ -490,13 +661,110 @@ model OrderRevision {
   tenantId      String   @map("tenant_id")
   orderId       String   @map("order_id")
   revisionNo    Int      @map("revision_no")
+  // diff: { "deliveryDate": { "from": "...", "to": "..." }, ... }
   changedFields Json     @map("changed_fields")
+  // full lines snapshot at time of this revision
+  linesSnapshot Json?    @map("lines_snapshot")
+  reason        String?
   revisedById   String   @map("revised_by_id")
   createdAt     DateTime @default(now()) @map("created_at")
 
   order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  @@unique([orderId, revisionNo])
+  @@index([tenantId, orderId])
   @@map("order_revisions")
+}
+
+// ── Inventory domain ───────────────────────────────────────────────────────
+
+// Bill of Materials — recipe for each finished good / style variant
+model Bom {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  itemId      String   @map("item_id")      // finished good
+  styleCode   String?  @map("style_code")   // optional style variant
+  version     Int      @default(1)
+  isActive    Boolean  @default(true) @map("is_active")
+  remarks     String?
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt     @map("updated_at")
+
+  item        Item     @relation("BomFinishedGood", fields: [itemId], references: [id])
+  lines       BomLine[]
+
+  @@unique([tenantId, itemId, styleCode, version])
+  @@index([tenantId, itemId])
+  @@map("boms")
+}
+
+// BOM component lines — each raw material / trim needed
+model BomLine {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  bomId       String  @map("bom_id")
+  rawItemId   String  @map("raw_item_id")
+  qty         Decimal @db.Decimal(14,4)       // qty per unit of finished good
+  unit        String
+  wastagePct  Float   @default(0) @map("wastage_pct")
+  remarks     String?
+
+  bom         Bom     @relation(fields: [bomId],       references: [id], onDelete: Cascade)
+  rawItem     Item    @relation("BomRawMaterial", fields: [rawItemId], references: [id])
+
+  @@index([tenantId, bomId])
+  @@map("bom_lines")
+}
+
+// Stock Ledger — append-only log of every inventory movement
+enum LedgerEntryType {
+  GRN_IN
+  ISSUE_TO_PROD
+  RETURN_FROM_PROD
+  ADJUSTMENT
+  TRANSFER_IN
+  TRANSFER_OUT
+  OPENING_STOCK
+}
+
+model StockLedger {
+  id          String          @id @default(uuid())
+  tenantId    String          @map("tenant_id")
+  itemId      String          @map("item_id")
+  location    String          @default("MAIN")
+  entryType   LedgerEntryType @map("entry_type")
+  qty         Decimal         @db.Decimal(14,4)              // positive=in, negative=out
+  balanceQty  Decimal         @db.Decimal(14,4) @map("balance_qty")
+  rate        Decimal?        @db.Decimal(14,2)
+  refType     String?         @map("ref_type")               // GRN | ORDER | ADJUSTMENT
+  refId       String?         @map("ref_id")
+  remarks     String?
+  createdById String          @map("created_by_id")
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  item        Item            @relation(fields: [itemId], references: [id])
+
+  @@index([tenantId, itemId, location, createdAt])
+  @@map("stock_ledger")
+}
+
+// Stock Balance — materialized current balance (updated on every ledger entry)
+model StockBalance {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  itemId    String   @map("item_id")
+  location  String   @default("MAIN")
+  onHand    Decimal  @db.Decimal(14,4) @map("on_hand")
+  reserved  Decimal  @db.Decimal(14,4) @default(0)
+  available Decimal  @db.Decimal(14,4)                // onHand - reserved
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  item      Item     @relation(fields: [itemId], references: [id])
+
+  @@unique([tenantId, itemId, location])
+  @@index([tenantId, itemId])
+  @@map("stock_balances")
 }
 
 model Shipment {
@@ -638,4 +906,27 @@ model DelayRiskScore {
   order             Order    @relation(fields: [orderId], references: [id])
 
   @@map("delay_risk_scores")
+}
+
+// ── Client Mutation (offline sync idempotency) ────────────────────────────
+//
+// Stores the clientId of every mutation received from mobile clients.
+// Used for server-side deduplication: if a mutation with the same clientId
+// has already been processed, the server returns the cached result instead
+// of replaying the operation.  Rows are pruned after 30 days.
+
+model ClientMutation {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  userId       String   @map("user_id")
+  clientId     String   @map("client_id")        // UUID generated on client
+  endpoint     String                              // e.g. "/api/v1/buyers"
+  method       String                              // POST | PATCH | PUT | DELETE
+  statusCode   Int      @map("status_code")       // HTTP status returned
+  responseBody Json?    @map("response_body")      // cached response for idempotent replay
+  processedAt  DateTime @default(now()) @map("processed_at")
+
+  @@unique([tenantId, clientId])
+  @@index([tenantId, userId, processedAt])
+  @@map("client_mutations")
 }

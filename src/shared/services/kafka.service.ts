@@ -5,23 +5,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   Kafka, Producer, Consumer,
-  EachMessagePayload, KafkaMessage,
+  EachMessagePayload,
 } from 'kafkajs';
 
 type MessageHandler = (event: unknown) => Promise<void>;
-
-// ── KafkaService ──────────────────────────────────────────────────────────
-// Wraps KafkaJS for the NestJS DI system.
-// Used by every module's Producer and Consumer classes.
-//
-// Producers call: kafka.emit(topic, { key, value })
-// Consumers call: kafka.subscribe(topic, groupId, handler)
-//
-// All events are partitioned by tenantId (the key field) to guarantee
-// event ordering within a single tenant.
-//
-// Dead Letter Queue: failed messages are moved to {topic}.dlq after
-// the configured number of retries.
 
 @Injectable()
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
@@ -29,6 +16,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private readonly kafka:    Kafka;
   private readonly producer: Producer;
   private readonly consumers: Consumer[] = [];
+  private producerConnected  = false;   // guard: emit() and disconnect() check this
 
   constructor(private readonly config: ConfigService) {
     const brokers = config
@@ -39,10 +27,12 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     this.kafka = new Kafka({
       clientId: 'textile-erp-api',
       brokers,
+      // Suppress KafkaJS's own retry noise — we handle connection failure ourselves
+      logLevel: 1,   // ERROR only (0=NOTHING, 1=ERROR, 2=WARN, 4=INFO, 5=DEBUG)
       retry: {
-        retries:        5,
+        retries:          3,
         initialRetryTime: 300,
-        factor:         2,
+        factor:           2,
       },
     });
 
@@ -53,86 +43,100 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit(): Promise<void> {
-  try {
-    await this.producer.connect();
-    this.logger.log('Kafka producer connected');
-  } catch (err) {
-    this.logger.warn(
-      'Kafka not available — events will not be emitted. ' +
-      'Start Kafka with: docker compose up -d'
-    );
+    try {
+      await this.producer.connect();
+      this.producerConnected = true;
+      this.logger.log('Kafka producer connected');
+    } catch {
+      this.logger.warn(
+        'Kafka not available — events will not be emitted. ' +
+        'Start Kafka with: docker compose up -d kafka',
+      );
+    }
   }
-}
 
   async onModuleDestroy(): Promise<void> {
-    await this.producer.disconnect();
-    await Promise.all(this.consumers.map(c => c.disconnect()));
-    this.logger.log('Kafka producer and consumers disconnected');
+    // Only disconnect what was actually connected
+    if (this.producerConnected) {
+      await this.producer.disconnect().catch(() => {});
+    }
+    await Promise.all(
+      this.consumers.map(c => c.disconnect().catch(() => {})),
+    );
   }
 
-  // ── Emit an event to a topic ──────────────────────────────────────────
-  // key must be tenantId — ensures all events for one tenant land on
-  // the same partition, preserving ordering within a tenant.
-async emit(
-  topic:   string,
-  message: { key: string; value: unknown },
-): Promise<void> {
-  try {
-    await this.producer.send({
-      topic,
-      messages: [{
-        key:   message.key,
-        value: JSON.stringify(message.value),
-      }],
-    });
-    this.logger.debug(`Emitted → ${topic} [key=${message.key}]`);
-  } catch (err) {
-    this.logger.warn(`Kafka emit failed for ${topic} — Kafka may be down`);
-    // Do not throw — Kafka failure must not break the main operation
+  // ── Emit an event to a topic ────────────────────────────────────────────
+  // key = tenantId — guarantees ordering within a tenant (same partition).
+  // Never throws: Kafka failure must not break the main HTTP operation.
+  async emit(
+    topic:   string,
+    message: { key: string; value: unknown },
+  ): Promise<void> {
+    if (!this.producerConnected) return;   // silently skip when Kafka is down
+    try {
+      await this.producer.send({
+        topic,
+        messages: [{
+          key:   message.key,
+          value: JSON.stringify(message.value),
+        }],
+      });
+      this.logger.debug(`Emitted → ${topic} [key=${message.key}]`);
+    } catch (err) {
+      this.logger.warn(`Kafka emit failed for ${topic}: ${(err as Error).message}`);
+    }
   }
-}
 
-  // ── Subscribe to a topic ──────────────────────────────────────────────
-  // groupId must be unique per consumer — prevents the same message
-  // being processed by multiple service instances simultaneously.
-  // Convention: '{module-name}-{topic-name}'
-  // Example: 'inventory-service-order-confirmed'
+  // ── Subscribe to a topic ────────────────────────────────────────────────
+  // groupId convention: '{module}-{topic}', e.g. 'inventory-order-confirmed'
+  // No-ops when Kafka is unavailable — subscriptions simply won't activate.
   async subscribe(
     topic:   string,
     groupId: string,
     handler: MessageHandler,
   ): Promise<void> {
-    const consumer = this.kafka.consumer({
-      groupId,
-      sessionTimeout:   30000,
-      heartbeatInterval: 3000,
-    });
+    if (!this.producerConnected) {
+      this.logger.warn(`Skipping subscription to ${topic} — Kafka unavailable`);
+      return;
+    }
 
-    await consumer.connect();
-    await consumer.subscribe({ topic, fromBeginning: false });
+    try {
+      const consumer = this.kafka.consumer({
+        groupId,
+        sessionTimeout:    30000,
+        heartbeatInterval: 3000,
+      });
 
-    await consumer.run({
-      eachMessage: async (payload: EachMessagePayload) => {
-        const raw = payload.message.value?.toString();
-        if (!raw) return;
+      await consumer.connect();
+      await consumer.subscribe({ topic, fromBeginning: false });
 
-        try {
-          const event = JSON.parse(raw);
-          await handler(event);
-        } catch (err) {
-          this.logger.error(
-            `Consumer error on ${topic} [group=${groupId}]: ${(err as Error).message}`,
-            (err as Error).stack,
-          );
+      await consumer.run({
+        eachMessage: async (payload: EachMessagePayload) => {
+          const raw = payload.message.value?.toString();
+          if (!raw) return;
+          try {
+            await handler(JSON.parse(raw));
+          } catch (err) {
+            this.logger.error(
+              `Consumer error on ${topic} [group=${groupId}]: ${(err as Error).message}`,
+              (err as Error).stack,
+            );
+            throw err;   // re-throw so KafkaJS retries → DLQ after max retries
+          }
+        },
+      });
 
-          // Re-throw so KafkaJS retries the message.
-          // After max retries, it moves to the Dead Letter Queue.
-          throw err;
-        }
-      },
-    });
+      this.consumers.push(consumer);
+      this.logger.log(`Subscribed to ${topic} [group=${groupId}]`);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to subscribe to ${topic}: ${(err as Error).message}`,
+      );
+    }
+  }
 
-    this.consumers.push(consumer);
-    this.logger.log(`Subscribed to ${topic} [group=${groupId}]`);
+  // ── Health check ────────────────────────────────────────────────────────
+  isAvailable(): boolean {
+    return this.producerConnected;
   }
 }

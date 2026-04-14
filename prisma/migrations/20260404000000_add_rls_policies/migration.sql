@@ -23,9 +23,11 @@
 --
 -- ============================================================================
 
--- ── Helper function ──────────────────────────────────────────────────────────
+-- ── Schema guard (MUST come before any app.* function definitions) ───────────
+CREATE SCHEMA IF NOT EXISTS app;
+
+-- ── Helper functions ─────────────────────────────────────────────────────────
 -- Returns the current tenant UUID from the session variable, or '' if not set.
--- Used in every policy expression below.
 
 CREATE OR REPLACE FUNCTION app.current_tenant_id()
 RETURNS text
@@ -50,17 +52,12 @@ AS $$
   SELECT current_setting('app.current_role', true)
 $$;
 
--- ── Schema guard ─────────────────────────────────────────────────────────────
--- The helper functions live in the app schema which must exist.
-CREATE SCHEMA IF NOT EXISTS app;
 
 -- ── tenants table ────────────────────────────────────────────────────────────
 
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tenants FORCE ROW LEVEL SECURITY;   -- applies to table owner too
+ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
 
--- SELECT: a session may only read its own tenant row.
--- OWNER users can read their tenant (no extra clause needed — same condition).
 CREATE POLICY tenants_select
   ON tenants
   FOR SELECT
@@ -68,11 +65,6 @@ CREATE POLICY tenants_select
     id = app.current_tenant_id()
   );
 
--- INSERT: only the admin DB role (BYPASSRLS) can create tenants.
--- Application code goes through an admin service layer, never direct INSERT.
--- No INSERT policy → INSERT blocked for app_user (default-deny).
-
--- UPDATE: OWNER role may update their own tenant row.
 CREATE POLICY tenants_update
   ON tenants
   FOR UPDATE
@@ -84,28 +76,20 @@ CREATE POLICY tenants_update
     id = app.current_tenant_id()
   );
 
--- DELETE: blocked for all application roles (admin only via BYPASSRLS).
-
 
 -- ── users table ──────────────────────────────────────────────────────────────
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users FORCE ROW LEVEL SECURITY;
 
--- SELECT: see users in the same tenant.
--- Additionally, a user can always see themselves (cross-tenant support for
--- super-admin accounts that span multiple tenants is handled at app layer).
 CREATE POLICY users_select
   ON users
   FOR SELECT
   USING (
     tenant_id = app.current_tenant_id()
-    OR id = app.current_user_id()        -- self-access (e.g. /me endpoint)
+    OR id = app.current_user_id()
   );
 
--- INSERT: OWNER or users:write permission holders can invite new users.
--- The permission check is done at the application layer (RBAC guard).
--- Here we just enforce tenant boundary: new user must belong to same tenant.
 CREATE POLICY users_insert
   ON users
   FOR INSERT
@@ -113,14 +97,13 @@ CREATE POLICY users_insert
     tenant_id = app.current_tenant_id()
   );
 
--- UPDATE: users can update themselves; OWNER can update anyone in tenant.
 CREATE POLICY users_update
   ON users
   FOR UPDATE
   USING (
     tenant_id = app.current_tenant_id()
     AND (
-      id = app.current_user_id()          -- self-update (change password, etc.)
+      id = app.current_user_id()
       OR app.current_role_name() = 'OWNER'
     )
   )
@@ -128,7 +111,6 @@ CREATE POLICY users_update
     tenant_id = app.current_tenant_id()
   );
 
--- DELETE (soft-delete): OWNER only, within same tenant.
 CREATE POLICY users_delete
   ON users
   FOR DELETE
@@ -143,17 +125,14 @@ CREATE POLICY users_delete
 ALTER TABLE roles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE roles FORCE ROW LEVEL SECURITY;
 
--- System roles (tenant_id IS NULL) are readable by everyone.
--- Tenant-custom roles are visible only within that tenant.
 CREATE POLICY roles_select
   ON roles
   FOR SELECT
   USING (
-    tenant_id IS NULL                          -- system-wide roles (seeded)
-    OR tenant_id = app.current_tenant_id()     -- tenant-specific custom roles
+    tenant_id IS NULL
+    OR tenant_id = app.current_tenant_id()
   );
 
--- INSERT/UPDATE/DELETE for custom roles: OWNER only, within tenant.
 CREATE POLICY roles_insert
   ON roles
   FOR INSERT
@@ -168,7 +147,7 @@ CREATE POLICY roles_update
   USING (
     tenant_id = app.current_tenant_id()
     AND app.current_role_name() = 'OWNER'
-    AND is_system = false                      -- system roles are immutable
+    AND is_system = false
   )
   WITH CHECK (
     tenant_id = app.current_tenant_id()
@@ -194,7 +173,7 @@ CREATE POLICY user_roles_select
   FOR SELECT
   USING (
     tenant_id = app.current_tenant_id()
-    OR user_id = app.current_user_id()         -- see own role assignments
+    OR user_id = app.current_user_id()
   );
 
 CREATE POLICY user_roles_insert
@@ -219,8 +198,6 @@ CREATE POLICY user_roles_delete
 ALTER TABLE tenant_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_config FORCE ROW LEVEL SECURITY;
 
--- All authenticated users can read public config (is_public = true).
--- OWNER sees everything including private / encrypted config.
 CREATE POLICY tenant_config_select
   ON tenant_config
   FOR SELECT
@@ -244,10 +221,10 @@ CREATE POLICY tenant_config_write
   );
 
 
--- ── buyers / suppliers / orders — tenant boundary only ───────────────────────
+-- ── buyers / suppliers / purchase_orders — tenant boundary only ──────────────
 -- Fine-grained permission checks (buyers:read, orders:confirm, etc.) are
 -- handled at the application layer (RBAC guard + @RequirePermissions).
--- RLS here just enforces the hard tenant boundary as a defense-in-depth layer.
+-- RLS here enforces the hard tenant boundary as a defense-in-depth layer.
 
 ALTER TABLE buyers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE buyers FORCE ROW LEVEL SECURITY;
@@ -265,22 +242,6 @@ CREATE POLICY suppliers_tenant_isolation
   USING  (tenant_id = app.current_tenant_id())
   WITH CHECK (tenant_id = app.current_tenant_id());
 
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-ALTER TABLE orders FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY orders_tenant_isolation
-  ON orders FOR ALL
-  USING  (tenant_id = app.current_tenant_id())
-  WITH CHECK (tenant_id = app.current_tenant_id());
-
-ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE invoices FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY invoices_tenant_isolation
-  ON invoices FOR ALL
-  USING  (tenant_id = app.current_tenant_id())
-  WITH CHECK (tenant_id = app.current_tenant_id());
-
 ALTER TABLE purchase_orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE purchase_orders FORCE ROW LEVEL SECURITY;
 
@@ -289,23 +250,28 @@ CREATE POLICY purchase_orders_tenant_isolation
   USING  (tenant_id = app.current_tenant_id())
   WITH CHECK (tenant_id = app.current_tenant_id());
 
+-- NOTE: orders and invoices tables are not yet created in this migration set.
+-- RLS for those tables will be added in the migration that creates them.
 
--- ── Grant table permissions to app role ──────────────────────────────────────
+
+-- ── Grant table permissions to app_user role (only if the role exists) ───────
 -- app_user: normal application queries (RLS enforced)
 -- app_admin: migrations, seeding (BYPASSRLS)
 -- Create these roles outside migrations via your DB init script.
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON tenants        TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON users          TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON roles          TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON user_roles     TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_config  TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON buyers         TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON suppliers      TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON orders         TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON invoices       TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON purchase_orders TO app_user;
-
-GRANT EXECUTE ON FUNCTION app.current_tenant_id() TO app_user;
-GRANT EXECUTE ON FUNCTION app.current_user_id()   TO app_user;
-GRANT EXECUTE ON FUNCTION app.current_role_name() TO app_user;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON tenants         TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON users           TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON roles           TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON user_roles      TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_config   TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON buyers          TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON suppliers       TO app_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON purchase_orders TO app_user;
+    GRANT EXECUTE ON FUNCTION app.current_tenant_id() TO app_user;
+    GRANT EXECUTE ON FUNCTION app.current_user_id()   TO app_user;
+    GRANT EXECUTE ON FUNCTION app.current_role_name() TO app_user;
+  END IF;
+END $$;
