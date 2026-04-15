@@ -9,6 +9,8 @@ import { InventoryModule }    from './modules/inventory/inventory.module';
 import { SyncModule }         from './modules/sync/sync.module';
 import { FinanceModule }      from './modules/finance/finance.module';
 import { MrpModule }          from './modules/mrp/mrp.module';
+import { ProductionModule }   from './modules/production/production.module';
+import { QueuesModule }       from './modules/queues/queues.module';
 import { HealthController }   from './shared/health.controller';
 
 @Module({
@@ -23,6 +25,8 @@ import { HealthController }   from './shared/health.controller';
     SyncModule,
     FinanceModule,
     MrpModule,
+    ProductionModule,
+    QueuesModule,
   ],
   controllers: [HealthController],
 })

@@ -427,12 +427,9 @@ model Item {
   category   String? // FABRIC | TRIM | PACKING | FINISHED_GOODS
   properties Json?
 
-  boms         Bom[]          @relation("BomFinishedGood")
-  bomLines     BomLine[]      @relation("BomRawMaterial")
-  stockLedger  StockLedger[]
-  stockBalance StockBalance[]
-  bomParent  Bom[]         @relation("BomParent")
-  bomLines   BomLine[]
+  boms          Bom[]          @relation("BomParent")
+  bomLines      BomLine[]      @relation("BomChild")
+  stockLedger   StockLedger[]
   stockBalances StockBalance[]
 
   @@unique([tenantId, code])
@@ -450,6 +447,7 @@ model Bom {
   id            String    @id @default(uuid())
   tenantId      String    @map("tenant_id")
   parentItemId  String    @map("parent_item_id")   // the finished good
+  styleCode     String?   @map("style_code")       // optional style variant
   version       Int       @default(1)
   isActive      Boolean   @default(true)  @map("is_active")
   remarks       String?
@@ -477,7 +475,7 @@ model BomLine {
   remarks       String?
 
   bom           Bom     @relation(fields: [bomId], references: [id], onDelete: Cascade)
-  childItem     Item    @relation(fields: [childItemId], references: [id])
+  childItem     Item    @relation("BomChild", fields: [childItemId], references: [id])
 
   @@index([tenantId, bomId])
   @@map("bom_lines")
@@ -486,16 +484,19 @@ model BomLine {
 // ── Stock Balance ─────────────────────────────────────────────────────────
 
 model StockBalance {
-  id         String  @id @default(uuid())
-  tenantId   String  @map("tenant_id")
-  itemId     String  @map("item_id")
-  location   String  @default("MAIN")            // warehouse / location code
-  onHand     Float   @default(0)  @map("on_hand")
-  allocated  Float   @default(0)                 // reserved for production
-  onOrder    Float   @default(0)  @map("on_order") // qty on open POs
-  unit       String
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  itemId     String   @map("item_id")
+  location   String   @default("MAIN")              // warehouse / location code
+  onHand     Float    @default(0)  @map("on_hand")
+  allocated  Float    @default(0)                   // reserved for production (MRP/sync)
+  onOrder    Float    @default(0)  @map("on_order") // qty on open POs
+  reserved   Float    @default(0)                   // reserved qty (inventory)
+  available  Float    @default(0)                   // onHand - reserved
+  unit       String   @default("PCS")
+  updatedAt  DateTime @updatedAt   @map("updated_at")
 
-  item       Item    @relation(fields: [itemId], references: [id])
+  item       Item     @relation(fields: [itemId], references: [id])
 
   @@unique([tenantId, itemId, location])
   @@index([tenantId, itemId])
@@ -592,6 +593,110 @@ model PurchaseRequisition {
 }
 
 
+// ── Production domain ──────────────────────────────────────────────────────
+//
+// CutOrder  → Cutting room job for an order/style (fabric → cut pieces)
+// LinePlan  → Assigns a sewing line to a style for a shift/day
+// WipRecord → Tracks work-in-progress as pieces flow through stages
+
+enum CutOrderStatus {
+  PLANNED
+  CUTTING
+  COMPLETED
+  CANCELLED
+}
+
+model CutOrder {
+  id              String         @id @default(uuid())
+  tenantId        String         @map("tenant_id")
+  orderId         String         @map("order_id")
+  cutOrderNumber  String         @map("cut_order_number")
+  styleCode       String         @map("style_code")
+  fabricItemId    String?        @map("fabric_item_id")
+  plannedQty      Int            @map("planned_qty")
+  cutQty          Int            @default(0) @map("cut_qty")
+  damagedQty      Int            @default(0) @map("damaged_qty")
+  layers          Int            @default(1)
+  markerLength    Float?         @map("marker_length")       // metres
+  fabricConsumption Float?       @map("fabric_consumption")  // total metres used
+  status          CutOrderStatus @default(PLANNED)
+  plannedDate     DateTime       @map("planned_date")
+  completedAt     DateTime?      @map("completed_at")
+  createdById     String         @map("created_by_id")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt      @map("updated_at")
+
+  order           Order          @relation(fields: [orderId], references: [id])
+
+  @@index([tenantId, orderId])
+  @@index([tenantId, status])
+  @@unique([tenantId, cutOrderNumber])
+  @@map("cut_orders")
+}
+
+enum LinePlanStatus {
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+model LinePlan {
+  id            String         @id @default(uuid())
+  tenantId      String         @map("tenant_id")
+  orderId       String         @map("order_id")
+  lineNumber    String         @map("line_number")       // e.g. "LINE-01"
+  styleCode     String         @map("style_code")
+  targetQty     Int            @map("target_qty")
+  achievedQty   Int            @default(0) @map("achieved_qty")
+  rejectQty     Int            @default(0) @map("reject_qty")
+  operatorCount Int            @default(0) @map("operator_count")
+  sam           Float?                                   // Standard Allowed Minutes
+  efficiency    Float?                                   // actual vs SAM %
+  status        LinePlanStatus @default(SCHEDULED)
+  planDate      DateTime       @map("plan_date")
+  shift         String         @default("DAY")           // DAY | NIGHT
+  createdById   String         @map("created_by_id")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt      @map("updated_at")
+
+  order         Order          @relation(fields: [orderId], references: [id])
+
+  @@index([tenantId, orderId])
+  @@index([tenantId, planDate])
+  @@index([tenantId, lineNumber, planDate])
+  @@map("line_plans")
+}
+
+enum WipStage {
+  CUTTING
+  SEWING
+  FINISHING
+  PACKING
+}
+
+model WipRecord {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  orderId     String   @map("order_id")
+  styleCode   String   @map("style_code")
+  stage       WipStage
+  inputQty    Int      @map("input_qty")
+  outputQty   Int      @default(0) @map("output_qty")
+  rejectQty   Int      @default(0) @map("reject_qty")
+  recordDate  DateTime @map("record_date")
+  remarks     String?
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt      @map("updated_at")
+
+  order       Order    @relation(fields: [orderId], references: [id])
+
+  @@index([tenantId, orderId])
+  @@index([tenantId, stage, recordDate])
+  @@map("wip_records")
+}
+
 // ── Order domain ───────────────────────────────────────────────────────────
 
 enum OrderStatus {
@@ -630,6 +735,9 @@ model Order {
   invoices      Invoice[]
   qcInspections QcInspection[]
   delayRisk     DelayRiskScore?
+  cutOrders     CutOrder[]
+  linePlans     LinePlan[]
+  wipRecords    WipRecord[]
 
   @@unique([tenantId, poNumber])
   @@index([tenantId, status, deliveryDate])
@@ -678,45 +786,6 @@ model OrderRevision {
 
 // ── Inventory domain ───────────────────────────────────────────────────────
 
-// Bill of Materials — recipe for each finished good / style variant
-model Bom {
-  id          String   @id @default(uuid())
-  tenantId    String   @map("tenant_id")
-  itemId      String   @map("item_id")      // finished good
-  styleCode   String?  @map("style_code")   // optional style variant
-  version     Int      @default(1)
-  isActive    Boolean  @default(true) @map("is_active")
-  remarks     String?
-  createdById String   @map("created_by_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt     @map("updated_at")
-
-  item        Item     @relation("BomFinishedGood", fields: [itemId], references: [id])
-  lines       BomLine[]
-
-  @@unique([tenantId, itemId, styleCode, version])
-  @@index([tenantId, itemId])
-  @@map("boms")
-}
-
-// BOM component lines — each raw material / trim needed
-model BomLine {
-  id          String  @id @default(uuid())
-  tenantId    String  @map("tenant_id")
-  bomId       String  @map("bom_id")
-  rawItemId   String  @map("raw_item_id")
-  qty         Decimal @db.Decimal(14,4)       // qty per unit of finished good
-  unit        String
-  wastagePct  Float   @default(0) @map("wastage_pct")
-  remarks     String?
-
-  bom         Bom     @relation(fields: [bomId],       references: [id], onDelete: Cascade)
-  rawItem     Item    @relation("BomRawMaterial", fields: [rawItemId], references: [id])
-
-  @@index([tenantId, bomId])
-  @@map("bom_lines")
-}
-
 // Stock Ledger — append-only log of every inventory movement
 enum LedgerEntryType {
   GRN_IN
@@ -747,24 +816,6 @@ model StockLedger {
 
   @@index([tenantId, itemId, location, createdAt])
   @@map("stock_ledger")
-}
-
-// Stock Balance — materialized current balance (updated on every ledger entry)
-model StockBalance {
-  id        String   @id @default(uuid())
-  tenantId  String   @map("tenant_id")
-  itemId    String   @map("item_id")
-  location  String   @default("MAIN")
-  onHand    Decimal  @db.Decimal(14,4) @map("on_hand")
-  reserved  Decimal  @db.Decimal(14,4) @default(0)
-  available Decimal  @db.Decimal(14,4)                // onHand - reserved
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  item      Item     @relation(fields: [itemId], references: [id])
-
-  @@unique([tenantId, itemId, location])
-  @@index([tenantId, itemId])
-  @@map("stock_balances")
 }
 
 model Shipment {

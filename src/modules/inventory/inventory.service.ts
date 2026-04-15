@@ -40,7 +40,7 @@ export class InventoryService {
       where:   { tenantId },
       orderBy: { createdAt: 'desc' },
       include: {
-        item: { select: { id: true, name: true, code: true } },
+        parentItem: { select: { id: true, name: true, code: true } },
       },
     });
   }
@@ -49,10 +49,10 @@ export class InventoryService {
     const bom = await (this.prisma as any).bom.findFirst({
       where: { id, tenantId },
       include: {
-        item:  { select: { id: true, name: true, code: true } },
+        parentItem: { select: { id: true, name: true, code: true } },
         lines: {
           include: {
-            rawItem: { select: { id: true, name: true, code: true, unit: true } },
+            childItem: { select: { id: true, name: true, code: true, unit: true } },
           },
         },
       },
@@ -63,12 +63,12 @@ export class InventoryService {
   }
 
   async createBom(dto: CreateBomDto, tenantId: string, userId: string) {
-    const { lines, itemId, styleCode, remarks } = dto;
+    const { lines, parentItemId, styleCode, remarks } = dto;
 
     await (this.prisma as any).bom.updateMany({
       where: {
         tenantId,
-        itemId,
+        parentItemId,
         ...(styleCode ? { styleCode } : {}),
         isActive: true,
       },
@@ -76,7 +76,7 @@ export class InventoryService {
     });
 
     const latestVersion = await (this.prisma as any).bom.findFirst({
-      where:   { tenantId, itemId, ...(styleCode ? { styleCode } : {}) },
+      where:   { tenantId, parentItemId, ...(styleCode ? { styleCode } : {}) },
       orderBy: { version: 'desc' },
       select:  { version: true },
     });
@@ -86,7 +86,7 @@ export class InventoryService {
     const bom = await (this.prisma as any).bom.create({
       data: {
         tenantId,
-        itemId,
+        parentItemId,
         styleCode:   styleCode ?? null,
         version,
         isActive:    true,
@@ -95,16 +95,16 @@ export class InventoryService {
         lines: {
           create: lines.map(l => ({
             tenantId,
-            rawItemId:  l.rawItemId,
-            qty:        l.qty,
-            unit:       l.unit,
-            wastagePct: l.wastagePct ?? 0,
-            remarks:    l.remarks    ?? null,
+            childItemId: l.childItemId,
+            qtyPer:      l.qtyPer,
+            unit:        l.unit,
+            wastePct:    l.wastePct ?? 0,
+            remarks:     l.remarks  ?? null,
           })),
         },
       },
       include: {
-        item:  { select: { id: true, name: true, code: true } },
+        parentItem: { select: { id: true, name: true, code: true } },
         lines: true,
       },
     });
@@ -114,7 +114,7 @@ export class InventoryService {
       action:    'CREATE',
       tableName: 'boms',
       recordId:  bom.id,
-      newValues: { itemId, version, styleCode },
+      newValues: { parentItemId, version, styleCode },
     });
 
     return bom;
