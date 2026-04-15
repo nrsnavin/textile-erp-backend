@@ -15,14 +15,14 @@ const LEDGER_ENTRY_TYPES = [
 // ── BomLineDto ────────────────────────────────────────────────────────────────
 
 export class BomLineDto {
-  @ApiProperty({ description: 'Raw material item UUID' })
+  @ApiProperty({ description: 'Raw material / component item UUID' })
   @IsUUID()
-  rawItemId!: string;
+  childItemId!: string;
 
-  @ApiProperty({ description: 'Quantity required per finished unit', minimum: 0.0001 })
+  @ApiProperty({ description: 'Quantity per unit of finished good', minimum: 0.0001 })
   @IsNumber()
   @IsPositive()
-  qty!: number;
+  qtyPer!: number;
 
   @ApiProperty({ description: 'Unit of measure (e.g. MTR, KGS, PCS)', example: 'MTR' })
   @IsString()
@@ -35,7 +35,7 @@ export class BomLineDto {
   @IsOptional()
   @IsNumber()
   @Min(0)
-  wastagePct?: number;
+  wastePct?: number;
 
   @ApiPropertyOptional({ description: 'Optional line-level remarks' })
   @IsOptional()
@@ -48,7 +48,7 @@ export class BomLineDto {
 export class CreateBomDto {
   @ApiProperty({ description: 'Finished-goods item UUID this BOM belongs to' })
   @IsUUID()
-  itemId!: string;
+  parentItemId!: string;
 
   @ApiPropertyOptional({ description: 'Style code the BOM is linked to', example: 'SS24-TEE-001' })
   @IsOptional()
