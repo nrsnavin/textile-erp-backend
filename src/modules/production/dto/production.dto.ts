@@ -3,7 +3,6 @@ import {
   IsString, IsInt, IsOptional, IsEnum, IsUUID, IsDateString,
   IsNumber, Min, Max,
 } from 'class-validator';
-import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaginationDto } from '../../../shared/utils/pagination.util';
 

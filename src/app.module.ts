@@ -10,6 +10,7 @@ import { SyncModule }         from './modules/sync/sync.module';
 import { FinanceModule }      from './modules/finance/finance.module';
 import { MrpModule }          from './modules/mrp/mrp.module';
 import { ProductionModule }   from './modules/production/production.module';
+import { QualityModule }      from './modules/quality/quality.module';
 import { QueuesModule }       from './modules/queues/queues.module';
 import { HealthController }   from './shared/health.controller';
 
@@ -26,6 +27,7 @@ import { HealthController }   from './shared/health.controller';
     FinanceModule,
     MrpModule,
     ProductionModule,
+    QualityModule,
     QueuesModule,
   ],
   controllers: [HealthController],
