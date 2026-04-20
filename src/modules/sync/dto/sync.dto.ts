@@ -7,15 +7,15 @@ import { Type } from 'class-transformer';
 export class MutationDto {
   @IsString()
   @IsNotEmpty()
-  clientId: string; // Client-generated UUID for idempotency
+  clientId!: string; // Client-generated UUID for idempotency
 
   @IsString()
   @IsNotEmpty()
-  endpoint: string; // e.g. "/api/v1/buyers"
+  endpoint!: string; // e.g. "/api/v1/buyers"
 
   @IsString()
   @IsIn(['POST', 'PATCH', 'PUT', 'DELETE'])
-  method: string;
+  method!: string;
 
   @IsOptional()
   @IsObject()
@@ -27,24 +27,24 @@ export class SyncPushDto {
   @ValidateNested({ each: true })
   @Type(() => MutationDto)
   @ArrayMaxSize(100) // Max 100 mutations per batch
-  mutations: MutationDto[];
+  mutations!: MutationDto[];
 }
 
 export class SyncAckQueryDto {
   @IsArray()
   @IsString({ each: true })
-  clientIds: string[];
+  clientIds!: string[];
 }
 
 export class MutationResultDto {
-  clientId: string;
-  status: 'applied' | 'duplicate' | 'error';
-  statusCode: number;
+  clientId!: string;
+  status!: 'applied' | 'duplicate' | 'error';
+  statusCode!: number;
   responseBody?: any;
   error?: string;
 }
 
 export class SyncPushResponseDto {
-  results: MutationResultDto[];
-  serverTime: string;
+  results!: MutationResultDto[];
+  serverTime!: string;
 }

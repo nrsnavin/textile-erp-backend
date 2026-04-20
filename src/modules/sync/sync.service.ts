@@ -51,7 +51,7 @@ export class SyncService {
       try {
         const result = await this.executeMutation(mutation, tenantId, userId);
         results.push(result);
-      } catch (error) {
+      } catch (error: any) {
         this.logger.error(
           `Mutation ${mutation.clientId} failed: ${error.message}`,
           error.stack,
